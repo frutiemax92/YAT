@@ -147,7 +147,7 @@ if __name__ == '__main__':
         .to_tuple("jpg", "txt")  # Return image and text
     )
 
-    pipe = SanaPAGPipeline.from_pretrained(pretrained_model_path).to(dtype=torch.bfloat16)
+    pipe = SanaPAGPipeline.from_pretrained(pretrained_model_path)
 
     # SANA transformer
     transformer = pipe.transformer
@@ -190,7 +190,7 @@ if __name__ == '__main__':
     dataloader = DataLoader(bucket_dataset, batch_size=None)
 
     # multi-gpu training
-    accelerator = Accelerator(mixed_precision='bf16')
+    accelerator = Accelerator()
     transformer, scheduler, vae, tokenizer, text_encoder, optimizer = accelerator.prepare(
         transformer, scheduler, vae, tokenizer, text_encoder, optimizer
     )
