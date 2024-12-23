@@ -157,6 +157,7 @@ if __name__ == '__main__':
 
     # vae
     vae = pipe.vae
+    vae = vae.to(dtype=torch.bfloat16)
     vae.train(False)
 
     # tokenizer
@@ -164,6 +165,7 @@ if __name__ == '__main__':
 
     # text encoder
     text_encoder = pipe.text_encoder
+    text_encoder = text_encoder.to(dtype=torch.bfloat16)
     text_encoder.train(False)
 
     vae_compression = 32
@@ -224,6 +226,3 @@ if __name__ == '__main__':
                      optimizer,
                      accelerator)
             global_step = global_step + 1
-
-
-

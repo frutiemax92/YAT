@@ -213,6 +213,7 @@ class BucketDataset(IterableDataset):
                     buckets[ratio].append((img, caption))
 
                 # check if any bucket is full
+                keys_to_remove = []
                 for key, bucket in buckets.items():
                     if len(bucket) == self.batch_size:
                         # transform the PIL image to a tensor
@@ -223,7 +224,11 @@ class BucketDataset(IterableDataset):
                             images.append(pil_to_tensor(img))
                             captions.append(caption)
                         yield torch.stack(images), captions
-                        buckets.pop(key)
+                        keys_to_remove.append(key)
+
+                for key in keys_to_remove:
+                    buckets.pop(key)
+    
             # check for left overs
             for key, bucket in enumerate(buckets):
                 if len(bucket) != 0:
