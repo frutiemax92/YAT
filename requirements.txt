@@ -1,0 +1,10 @@
+diffusers
+transformers
+torch
+torchvision
+accelerate
+beautifulsoup4
+ftfy
+webdataset
+tensorboard
+boto3
