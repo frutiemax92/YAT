@@ -2,7 +2,7 @@ import argparse
 import boto3
 from botocore.config import Config
 import webdataset as wds
-from bucket_sampler import BucketSampler, BatchCollater, get_bucket_indices, BucketDataset
+from bucket_sampler import BucketDataset
 from torch.utils.data import DataLoader, Subset
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_256_BIN, ASPECT_RATIO_512_BIN, ASPECT_RATIO_1024_BIN
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_2048_BIN
@@ -78,7 +78,7 @@ def optimize(logger : SummaryWriter,
 
     transformer = pipe.transformer
     with accelerator.accumulate(transformer):
-        noise_pred = transformer(noisy_latents,
+        noise_pred = transformer(noisy_latents.to(dtype=transformer.dtype),
                                  encoder_hidden_states=embeddings,
                                  timestep=timesteps,
                                  encoder_attention_mask=attention_mask).sample
@@ -144,11 +144,20 @@ if __name__ == '__main__':
 
     # build the dataset
     dataset = (
-        wds.WebDataset(urls)
+        wds.WebDataset(urls, nodesplitter=wds.split_by_node, workersplitter=wds.split_by_worker)
         .shuffle(1000)  # Shuffle across all shards
         .decode("pil")  # Decode images as PIL objects
         .to_tuple("jpg", "txt")  # Return image and text
     )
+
+    # dataset = wds.DataPipeline(
+    #     wds.SimpleShardList(urls),
+    #     wds.detshuffle(),
+    #     wds.split_by_node,
+    #     wds.split_by_worker,
+    #     wds.decode('pil'),
+    #     wds.to_tuple('jpg', 'txt')
+    # )
 
     pipe = SanaPAGPipeline.from_pretrained(pretrained_model_path)
 
