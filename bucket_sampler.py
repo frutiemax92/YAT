@@ -67,10 +67,10 @@ class BucketDataset(IterableDataset):
                     # also push a left over from the last epoch if any
                     if len(left_overs) != 0:
                         left_over = left_overs.pop()
-                        img, caption = left_over
+                        left_over_img, left_over_caption = left_over
                         crop_transform = CenterCrop((height_target, width_target))
-                        img = crop_transform(img)
-                        buckets[ratio].append((img, caption))
+                        left_over_img = crop_transform(left_over_img)
+                        buckets[ratio].append((left_over_img, left_over_caption))
 
                 # handle the case of batch size = 1???
                 if self.batch_size != 1:
@@ -94,7 +94,7 @@ class BucketDataset(IterableDataset):
                     buckets.pop(key)
     
             # check for left overs
-            for key, bucket in enumerate(buckets):
+            for key, bucket in buckets.items():
                 if len(bucket) != 0:
                     left_overs.extend(bucket)
             

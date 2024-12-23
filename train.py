@@ -109,6 +109,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_steps_per_validation', required=False, type=int, default=5000)
     parser.add_argument('--validation_prompts', required=True, nargs='+', type=str)
     parser.add_argument('--urls', required=False, nargs='+', type=str, default=None)
+    parser.add_argument('-v', '--bfloat16', action='store_true', required=False)
     args = parser.parse_args()
 
     # cloudflare related arguments
@@ -127,6 +128,7 @@ if __name__ == '__main__':
     num_epochs = args.num_epochs
     num_steps_per_validation = args.num_steps_per_validation
     validation_prompts = args.validation_prompts
+    use_bfloat16 = args.bfloat16
 
     if urls == None:
         # get the urls from the cloudflare bucket with the keys
@@ -152,26 +154,20 @@ if __name__ == '__main__':
         .to_tuple("jpg", "txt")  # Return image and text
     )
 
-    # dataset = wds.DataPipeline(
-    #     wds.SimpleShardList(urls),
-    #     wds.detshuffle(),
-    #     wds.split_by_node,
-    #     wds.split_by_worker,
-    #     wds.decode('pil'),
-    #     wds.to_tuple('jpg', 'txt')
-    # )
-
     pipe = SanaPAGPipeline.from_pretrained(pretrained_model_path).to(torch.bfloat16)
 
     # SANA transformer
     transformer = pipe.transformer
+    if use_bfloat16:
+        transformer = transformer.to(torch.bfloat16)
 
     # scheduler
     scheduler = pipe.scheduler
 
     # vae
     vae = pipe.vae
-    vae = vae.to(dtype=torch.bfloat16)
+    if use_bfloat16:
+        vae = vae.to(dtype=torch.bfloat16)
     vae.train(False)
 
     # tokenizer
@@ -179,7 +175,9 @@ if __name__ == '__main__':
 
     # text encoder
     text_encoder = pipe.text_encoder
-    text_encoder = text_encoder.to(dtype=torch.bfloat16)
+    
+    if use_bfloat16:
+        text_encoder = text_encoder.to(dtype=torch.bfloat16)
     text_encoder.train(False)
 
     vae_compression = 32
@@ -229,16 +227,16 @@ if __name__ == '__main__':
                                 validation_prompts)
                 accelerator.wait_for_everyone()
 
-            with torch.no_grad():
-                embeddings, attention_mask = extract_embeddings(captions, accelerator.unwrap_model(pipe))
-                latents = extract_latents(images, accelerator.unwrap_model(pipe))
+            # with torch.no_grad():
+            #     embeddings, attention_mask = extract_embeddings(captions, accelerator.unwrap_model(pipe))
+            #     latents = extract_latents(images, accelerator.unwrap_model(pipe))
             
-            optimize(logger,
-                     global_step,
-                     pipe,
-                     latents,
-                     embeddings,
-                     attention_mask,
-                     optimizer,
-                     accelerator)
+            # optimize(logger,
+            #          global_step,
+            #          pipe,
+            #          latents,
+            #          embeddings,
+            #          attention_mask,
+            #          optimizer,
+            #          accelerator)
             global_step = global_step + 1
