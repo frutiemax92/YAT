@@ -106,6 +106,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_epochs', required=False, type=int, default=5)
     parser.add_argument('--num_steps_per_validation', required=False, type=int, default=5000)
     parser.add_argument('--validation_prompts', required=True, nargs='+', type=str)
+    parser.add_argument('--urls', required=False, nargs='+', type=str, default=None)
     args = parser.parse_args()
 
     # cloudflare related arguments
@@ -114,6 +115,7 @@ if __name__ == '__main__':
     r2_secret_key = args.r2_secret_key
     r2_bucket_name = args.r2_bucket_name
     r2_tar_files = args.r2_tar_files
+    urls = args.urls
 
     # training parameters
     batch_size = args.batch_size
@@ -124,20 +126,21 @@ if __name__ == '__main__':
     num_steps_per_validation = args.num_steps_per_validation
     validation_prompts = args.validation_prompts
 
-    # get the urls from the cloudflare bucket with the keys
-    session = boto3.Session(
-        aws_access_key_id=r2_access_key,
-        aws_secret_access_key=r2_secret_key
-    )
-    config = Config(signature_version='s3v4')
-    s3_client = session.client('s3', endpoint_url=r2_endpoint, config=config)
+    if urls == None:
+        # get the urls from the cloudflare bucket with the keys
+        session = boto3.Session(
+            aws_access_key_id=r2_access_key,
+            aws_secret_access_key=r2_secret_key
+        )
+        config = Config(signature_version='s3v4')
+        s3_client = session.client('s3', endpoint_url=r2_endpoint, config=config)
 
-    # urls with 1 week expiration
-    urls = [s3_client.generate_presigned_url(
-        'get_object',
-        Params={'Bucket': r2_bucket_name, 'Key':tar_file},
-        ExpiresIn=604800
-    ) for tar_file in r2_tar_files]
+        # urls with 1 week expiration
+        urls = [s3_client.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': r2_bucket_name, 'Key':tar_file},
+            ExpiresIn=604800
+        ) for tar_file in r2_tar_files]
 
     # build the dataset
     dataset = (
