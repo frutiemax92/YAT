@@ -36,7 +36,7 @@ def extract_latents(images : torch.Tensor,
     images = image_processor.preprocess(torch.squeeze(images, dim=0))
     flush()
 
-    output = pipe.vae.encode(images.to(device=vae.device, dtype=vae.dtype))
+    output = pipe.vae.encode(images.to(device=pipe.vae.device, dtype=pipe.vae.dtype))
     return output.latent
 
 def validate(logger : SummaryWriter,
@@ -57,7 +57,7 @@ def validate(logger : SummaryWriter,
         idx = idx + 1
     
     # save the transformer
-    transformer.save_pretrained(f'{global_step}')
+    pipe.transformer.save_pretrained(f'{global_step}')
 
 def optimize(logger : SummaryWriter,
              global_step: int,
@@ -86,7 +86,9 @@ def optimize(logger : SummaryWriter,
         accelerator.backward(loss)
         optimizer.step()
         optimizer.zero_grad()
-    logger.add_scalar('train/loss', loss.detach().item(), global_step)
+
+    if logger != None:
+        logger.add_scalar('train/loss', loss.detach().item(), global_step)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -159,7 +161,7 @@ if __name__ == '__main__':
     #     wds.to_tuple('jpg', 'txt')
     # )
 
-    pipe = SanaPAGPipeline.from_pretrained(pretrained_model_path)
+    pipe = SanaPAGPipeline.from_pretrained(pretrained_model_path).to(torch.bfloat16)
 
     # SANA transformer
     transformer = pipe.transformer
@@ -212,6 +214,8 @@ if __name__ == '__main__':
 
     if accelerator.is_main_process:
         logger = SummaryWriter()
+    else:
+        logger = None
     
     for epoch in range(num_epochs):
         for images, captions in tqdm(dataloader):
@@ -221,13 +225,13 @@ if __name__ == '__main__':
                     with torch.no_grad():
                         validate(logger,
                                 global_step,
-                                pipe,
+                                accelerator.unwrap_model(pipe),
                                 validation_prompts)
                 accelerator.wait_for_everyone()
 
             with torch.no_grad():
-                embeddings, attention_mask = extract_embeddings(captions, pipe)
-                latents = extract_latents(images, pipe)
+                embeddings, attention_mask = extract_embeddings(captions, accelerator.unwrap_model(pipe))
+                latents = extract_latents(images, accelerator.unwrap_model(pipe))
             
             optimize(logger,
                      global_step,
