@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, Subset
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_256_BIN, ASPECT_RATIO_512_BIN, ASPECT_RATIO_1024_BIN
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_2048_BIN
 from accelerate import Accelerator
-from diffusers import SanaTransformer2DModel, DDPMScheduler, AutoencoderDC, FlowMatchEulerDiscreteScheduler
+from diffusers import SanaTransformer2DModel, DDPMScheduler, AutoencoderDC, FlowMatchEulerDiscreteScheduler, DPMSolverMultistepScheduler
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from diffusers.training_utils import compute_density_for_timestep_sampling
 from torch.optim.adamw import AdamW
@@ -17,6 +17,8 @@ import torch
 from tqdm import tqdm
 from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
+from cloudflare import get_secured_urls
+import random
 import gc
 
 def flush():
@@ -37,8 +39,8 @@ def extract_latents(images : torch.Tensor,
     images = image_processor.preprocess(torch.squeeze(images, dim=0))
     flush()
 
-    output = pipe.vae.encode(images.to(device=pipe.vae.device, dtype=pipe.vae.dtype))
-    return output.latent
+    output = pipe.vae.encode(images.to(device=pipe.vae.device, dtype=pipe.vae.dtype)).latent
+    return output * pipe.vae.config.scaling_factor
 
 def validate(logger : SummaryWriter,
              global_step: int,
@@ -51,6 +53,7 @@ def validate(logger : SummaryWriter,
         image = pipe(
             prompt=prompt,
             guidance_scale=5.0,
+            pag_scale=2.0,
             num_inference_steps=20,
             generator=generator,
         )[0]
@@ -66,38 +69,26 @@ def optimize(logger : SummaryWriter,
              latents : torch.Tensor,
              embeddings : torch.Tensor,
              attention_mask : torch.Tensor,
-             scheduler : DDPMScheduler,
+             scheduler : DPMSolverMultistepScheduler,
              optimizer : AdamW,
              accelerator : Accelerator):
     loss_fn = torch.nn.MSELoss()
     noise = randn_tensor(latents.shape, device=pipe.device, dtype=pipe.dtype)
 
-    # copied from the dreambooth lora training script from the SANA repository
-    # u = compute_density_for_timestep_sampling(weighting_scheme='logit_normal',
-    #                                           batch_size=batch_size,
-    #                                           logit_mean=0.0,
-    #                                           logit_std=1.0,
-    #                                           mode_scale=1.29)
-    # indices = (u * scheduler.config.num_train_timesteps).long()
-    # timesteps = scheduler.timesteps[indices].to(device=latents.device)
-
-    # def get_sigmas(timesteps, n_dim=4, dtype=torch.float32):
-    #     sigmas = scheduler.sigmas.to(device=accelerator.device, dtype=dtype)
-    #     schedule_timesteps = scheduler.timesteps.to(accelerator.device)
-    #     timesteps = timesteps.to(accelerator.device)
-    #     step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
-
-    #     sigma = sigmas[step_indices].flatten()
-    #     while len(sigma.shape) < n_dim:
-    #         sigma = sigma.unsqueeze(-1)
-    #     return sigma
-
-    # sigmas = get_sigmas(timesteps, n_dim=latents.ndim, dtype=latents.dtype)
-    # noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
-    timestep = torch.randint(0, scheduler.config.num_train_timesteps, (1,), device=latents.device)
+    # copied from the dreambooth lora training script from diffusers (either SANA or SD3 for reference)
+    u = compute_density_for_timestep_sampling(
+                    weighting_scheme='logit_normal',
+                    batch_size=batch_size,
+                    logit_mean=0.0,
+                    logit_std=1.0,
+                    mode_scale=1.29,
+                )
+    indices = (u * scheduler.config.num_train_timesteps).long()
+    #timesteps = scheduler.timesteps[indices].to(device=latents.device)
+    timestep = torch.tensor(random.choice(scheduler.timesteps)).to(device=latents.device)
     timesteps = timestep.expand(batch_size)
+    #noisy_model_input = scheduler.scale_noise(latents, timesteps, noise)
     noisy_model_input = scheduler.add_noise(latents, noise, timesteps)
-    noisy_model_input = scheduler.scale_model_input(noisy_model_input, timesteps)
 
     transformer = pipe.transformer
     with accelerator.accumulate(transformer):
@@ -105,7 +96,8 @@ def optimize(logger : SummaryWriter,
                                  encoder_hidden_states=embeddings,
                                  timestep=timesteps,
                                  encoder_attention_mask=attention_mask).sample
-        loss = loss_fn(noise_pred.to(dtype=noise.dtype), noise)
+        target = noise - latents
+        loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
         accelerator.backward(loss)
         optimizer.step()
         optimizer.zero_grad()
@@ -134,6 +126,7 @@ if __name__ == '__main__':
     parser.add_argument('--urls', required=False, nargs='+', type=str, default=None)
     parser.add_argument('-v', '--bfloat16', action='store_true', required=False)
     parser.add_argument('--gradient_accumulation_steps', required=False, type=int, default=1)
+    parser.add_argument('--output_repo', required=False, type=str, default=None)
     args = parser.parse_args()
 
     # cloudflare related arguments
@@ -154,23 +147,14 @@ if __name__ == '__main__':
     validation_prompts = args.validation_prompts
     use_bfloat16 = args.bfloat16
     gradient_accumulation_steps = args.gradient_accumulation_steps
+    output_repo = args.output_repo
 
     if urls == None:
-        # get the urls from the cloudflare bucket with the keys
-        session = boto3.Session(
-            aws_access_key_id=r2_access_key,
-            aws_secret_access_key=r2_secret_key
-        )
-        config = Config(signature_version='s3v4')
-        s3_client = session.client('s3', endpoint_url=r2_endpoint, config=config)
-
-        # urls with 1 week expiration
-        urls = [s3_client.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': r2_bucket_name, 'Key':tar_file},
-            ExpiresIn=604800
-        ) for tar_file in r2_tar_files]
-
+        urls = get_secured_urls(r2_access_key,
+                                r2_secret_key,
+                                r2_endpoint,
+                                r2_bucket_name,
+                                r2_tar_files)
     # build the dataset
     dataset = (
         wds.WebDataset(urls, handler=wds.warn_and_continue, nodesplitter=wds.split_by_node, workersplitter=wds.split_by_worker)
@@ -187,7 +171,7 @@ if __name__ == '__main__':
         transformer = transformer.to(torch.bfloat16)
 
     # scheduler
-    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(pretrained_model_path, subfolder='scheduler')
+    scheduler = DPMSolverMultistepScheduler.from_pretrained(pretrained_model_path, subfolder='scheduler')
 
     # vae
     vae = pipe.vae
@@ -265,3 +249,14 @@ if __name__ == '__main__':
                      optimizer,
                      accelerator)
             global_step = global_step + 1
+            flush()
+    accelerator.wait_for_everyone()
+
+    # final validation
+    validate(logger,
+        global_step,
+        accelerator.unwrap_model(pipe),
+        validation_prompts)
+    
+    if output_repo != None:
+        transformer.push_to_hub(output_repo)
