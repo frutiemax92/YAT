@@ -73,27 +73,31 @@ def optimize(logger : SummaryWriter,
     noise = randn_tensor(latents.shape, device=pipe.device, dtype=pipe.dtype)
 
     # copied from the dreambooth lora training script from the SANA repository
-    u = compute_density_for_timestep_sampling(weighting_scheme='logit_normal',
-                                              batch_size=batch_size,
-                                              logit_mean=0.0,
-                                              logit_std=1.0,
-                                              mode_scale=1.29)
-    indices = (u * scheduler.config.num_train_timesteps).long()
-    timesteps = scheduler.timesteps[indices].to(device=latents.device)
+    # u = compute_density_for_timestep_sampling(weighting_scheme='logit_normal',
+    #                                           batch_size=batch_size,
+    #                                           logit_mean=0.0,
+    #                                           logit_std=1.0,
+    #                                           mode_scale=1.29)
+    # indices = (u * scheduler.config.num_train_timesteps).long()
+    # timesteps = scheduler.timesteps[indices].to(device=latents.device)
 
-    def get_sigmas(timesteps, n_dim=4, dtype=torch.float32):
-        sigmas = scheduler.sigmas.to(device=accelerator.device, dtype=dtype)
-        schedule_timesteps = scheduler.timesteps.to(accelerator.device)
-        timesteps = timesteps.to(accelerator.device)
-        step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+    # def get_sigmas(timesteps, n_dim=4, dtype=torch.float32):
+    #     sigmas = scheduler.sigmas.to(device=accelerator.device, dtype=dtype)
+    #     schedule_timesteps = scheduler.timesteps.to(accelerator.device)
+    #     timesteps = timesteps.to(accelerator.device)
+    #     step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
 
-        sigma = sigmas[step_indices].flatten()
-        while len(sigma.shape) < n_dim:
-            sigma = sigma.unsqueeze(-1)
-        return sigma
+    #     sigma = sigmas[step_indices].flatten()
+    #     while len(sigma.shape) < n_dim:
+    #         sigma = sigma.unsqueeze(-1)
+    #     return sigma
 
-    sigmas = get_sigmas(timesteps, n_dim=latents.ndim, dtype=latents.dtype)
-    noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
+    # sigmas = get_sigmas(timesteps, n_dim=latents.ndim, dtype=latents.dtype)
+    # noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
+    timestep = torch.randint(0, scheduler.config.num_train_timesteps, (1,), device=latents.device)
+    timesteps = timestep.expand(batch_size)
+    noisy_model_input = scheduler.add_noise(latents, noise, timesteps)
+    noisy_model_input = scheduler.scale_model_input(noisy_model_input, timesteps)
 
     transformer = pipe.transformer
     with accelerator.accumulate(transformer):
