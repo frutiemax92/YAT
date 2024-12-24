@@ -74,20 +74,8 @@ def optimize(logger : SummaryWriter,
              accelerator : Accelerator):
     loss_fn = torch.nn.MSELoss()
     noise = randn_tensor(latents.shape, device=pipe.device, dtype=pipe.dtype)
-
-    # copied from the dreambooth lora training script from diffusers (either SANA or SD3 for reference)
-    u = compute_density_for_timestep_sampling(
-                    weighting_scheme='logit_normal',
-                    batch_size=batch_size,
-                    logit_mean=0.0,
-                    logit_std=1.0,
-                    mode_scale=1.29,
-                )
-    indices = (u * scheduler.config.num_train_timesteps).long()
-    #timesteps = scheduler.timesteps[indices].to(device=latents.device)
     timestep = torch.tensor(random.choice(scheduler.timesteps)).to(device=latents.device)
     timesteps = timestep.expand(batch_size)
-    #noisy_model_input = scheduler.scale_noise(latents, timesteps, noise)
     noisy_model_input = scheduler.add_noise(latents, noise, timesteps)
 
     transformer = pipe.transformer
@@ -224,7 +212,7 @@ if __name__ == '__main__':
     else:
         logger = None
     
-    for epoch in range(num_epochs):
+    for epoch in tqdm(range(num_epochs), desc='Num epochs'):
         for images, captions in tqdm(dataloader):
             images = torch.squeeze(images, dim=0)
             if global_step % num_steps_per_validation == 0:
