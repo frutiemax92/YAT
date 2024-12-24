@@ -7,8 +7,9 @@ from torch.utils.data import DataLoader, Subset
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_256_BIN, ASPECT_RATIO_512_BIN, ASPECT_RATIO_1024_BIN
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_2048_BIN
 from accelerate import Accelerator
-from diffusers import SanaTransformer2DModel, DPMSolverMultistepScheduler, AutoencoderDC
+from diffusers import SanaTransformer2DModel, DDPMScheduler, AutoencoderDC, FlowMatchEulerDiscreteScheduler
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from diffusers.training_utils import compute_density_for_timestep_sampling
 from torch.optim.adamw import AdamW
 from torch.utils.tensorboard import SummaryWriter
 from diffusers import SanaPAGPipeline
@@ -58,27 +59,45 @@ def validate(logger : SummaryWriter,
     
     # save the transformer
     pipe.transformer.save_pretrained(f'{global_step}')
-
+    
 def optimize(logger : SummaryWriter,
              global_step: int,
              pipe : SanaPAGPipeline,
              latents : torch.Tensor,
              embeddings : torch.Tensor,
              attention_mask : torch.Tensor,
+             scheduler : DDPMScheduler,
              optimizer : AdamW,
              accelerator : Accelerator):
     loss_fn = torch.nn.MSELoss()
     noise = randn_tensor(latents.shape, device=pipe.device, dtype=pipe.dtype)
-    
-    scheduler = pipe.scheduler
-    timestep = torch.randint(0, scheduler.config.num_train_timesteps, (1,), device=pipe.device)
-    timesteps = timestep.expand(latents.shape[0])
-    noisy_latents = scheduler.add_noise(latents, noise, timesteps)
-    noisy_latents = scheduler.scale_model_input(noisy_latents, timesteps)
+
+    # copied from the dreambooth lora training script from the SANA repository
+    u = compute_density_for_timestep_sampling(weighting_scheme='logit_normal',
+                                              batch_size=batch_size,
+                                              logit_mean=0.0,
+                                              logit_std=1.0,
+                                              mode_scale=1.29)
+    indices = (u * scheduler.config.num_train_timesteps).long()
+    timesteps = scheduler.timesteps[indices].to(device=latents.device)
+
+    def get_sigmas(timesteps, n_dim=4, dtype=torch.float32):
+        sigmas = scheduler.sigmas.to(device=accelerator.device, dtype=dtype)
+        schedule_timesteps = scheduler.timesteps.to(accelerator.device)
+        timesteps = timesteps.to(accelerator.device)
+        step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+
+        sigma = sigmas[step_indices].flatten()
+        while len(sigma.shape) < n_dim:
+            sigma = sigma.unsqueeze(-1)
+        return sigma
+
+    sigmas = get_sigmas(timesteps, n_dim=latents.ndim, dtype=latents.dtype)
+    noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
 
     transformer = pipe.transformer
     with accelerator.accumulate(transformer):
-        noise_pred = transformer(noisy_latents.to(dtype=transformer.dtype),
+        noise_pred = transformer(noisy_model_input.to(dtype=transformer.dtype),
                                  encoder_hidden_states=embeddings,
                                  timestep=timesteps,
                                  encoder_attention_mask=attention_mask).sample
@@ -110,6 +129,7 @@ if __name__ == '__main__':
     parser.add_argument('--validation_prompts', required=True, nargs='+', type=str)
     parser.add_argument('--urls', required=False, nargs='+', type=str, default=None)
     parser.add_argument('-v', '--bfloat16', action='store_true', required=False)
+    parser.add_argument('--gradient_accumulation_steps', required=False, type=int, default=1)
     args = parser.parse_args()
 
     # cloudflare related arguments
@@ -129,6 +149,7 @@ if __name__ == '__main__':
     num_steps_per_validation = args.num_steps_per_validation
     validation_prompts = args.validation_prompts
     use_bfloat16 = args.bfloat16
+    gradient_accumulation_steps = args.gradient_accumulation_steps
 
     if urls == None:
         # get the urls from the cloudflare bucket with the keys
@@ -148,10 +169,10 @@ if __name__ == '__main__':
 
     # build the dataset
     dataset = (
-        wds.WebDataset(urls, nodesplitter=wds.split_by_node, workersplitter=wds.split_by_worker)
-        .shuffle(1000)  # Shuffle across all shards
-        .decode("pil")  # Decode images as PIL objects
-        .to_tuple("jpg", "txt")  # Return image and text
+        wds.WebDataset(urls, handler=wds.warn_and_continue, nodesplitter=wds.split_by_node, workersplitter=wds.split_by_worker)
+        .shuffle(1000, handler=wds.warn_and_continue)  # Shuffle across all shards
+        .decode("pil", handler=wds.warn_and_continue)  # Decode images as PIL objects
+        .to_tuple("jpg", "txt", handler=wds.warn_and_continue)  # Return image and text
     )
 
     pipe = SanaPAGPipeline.from_pretrained(pretrained_model_path).to(torch.bfloat16)
@@ -162,7 +183,7 @@ if __name__ == '__main__':
         transformer = transformer.to(torch.bfloat16)
 
     # scheduler
-    scheduler = pipe.scheduler
+    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(pretrained_model_path, subfolder='scheduler')
 
     # vae
     vae = pipe.vae
@@ -204,7 +225,7 @@ if __name__ == '__main__':
     dataloader = DataLoader(bucket_dataset, batch_size=None)
 
     # multi-gpu training
-    accelerator = Accelerator()
+    accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps)
     transformer, scheduler, vae, tokenizer, text_encoder, optimizer = accelerator.prepare(
         transformer, scheduler, vae, tokenizer, text_encoder, optimizer
     )
@@ -225,18 +246,18 @@ if __name__ == '__main__':
                                 global_step,
                                 accelerator.unwrap_model(pipe),
                                 validation_prompts)
-                accelerator.wait_for_everyone()
 
-            # with torch.no_grad():
-            #     embeddings, attention_mask = extract_embeddings(captions, accelerator.unwrap_model(pipe))
-            #     latents = extract_latents(images, accelerator.unwrap_model(pipe))
+            with torch.no_grad():
+                embeddings, attention_mask = extract_embeddings(captions, accelerator.unwrap_model(pipe))
+                latents = extract_latents(images, accelerator.unwrap_model(pipe))
             
-            # optimize(logger,
-            #          global_step,
-            #          pipe,
-            #          latents,
-            #          embeddings,
-            #          attention_mask,
-            #          optimizer,
-            #          accelerator)
+            optimize(logger,
+                     global_step,
+                     pipe,
+                     latents,
+                     embeddings,
+                     attention_mask,
+                     scheduler,
+                     optimizer,
+                     accelerator)
             global_step = global_step + 1
