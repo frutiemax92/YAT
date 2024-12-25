@@ -5,6 +5,7 @@ import random
 from copy import copy
 from torchvision.transforms import Resize, Compose, RandomCrop, RandomHorizontalFlip, CenterCrop, PILToTensor
 import torch
+from accelerate import Accelerator
 
 class BucketDataset(IterableDataset):
     def __init__(self,
@@ -12,6 +13,7 @@ class BucketDataset(IterableDataset):
                  dataset,
                  batch_size,
                  aspect_ratios,
+                 accelerator : Accelerator,
                  discard_low_res=True):
         super().__init__()
         self.dataset = dataset
@@ -19,6 +21,7 @@ class BucketDataset(IterableDataset):
         self.aspect_ratios = aspect_ratios
         self.discard_low_res = discard_low_res
         self.num_epochs = num_epochs
+        self.accelerator = accelerator
     
     def find_closest_ratio(self, img):
         width = img.width
@@ -105,6 +108,7 @@ class BucketDataset(IterableDataset):
                 tqdm.write(f'There were {discarded_images} low resolution images in this epoch')
             tqdm.write(f'There are {len(left_overs)} images from this epoch that did not fit in any bucket')
 
-            # finally reinitialize the buckets
+            # finally reinitialize the buckets and wait for all the processes to come by
             buckets = {}
             discarded_images = 0
+            self.accelerator.wait_for_everyone()

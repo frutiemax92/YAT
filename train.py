@@ -218,6 +218,7 @@ if __name__ == '__main__':
     for images, captions in tqdm(dataloader):
         images = torch.squeeze(images, dim=0)
         if global_step % num_steps_per_validation == 0:
+            accelerator.wait_for_everyone()
             if accelerator.is_main_process:
                 with torch.no_grad():
                     validate(logger,
