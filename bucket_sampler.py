@@ -43,7 +43,7 @@ class BucketDataset(IterableDataset):
         pil_to_tensor = PILToTensor()
         # finally the buckets
         buckets = {}
-        for epoch in tqdm(range(self.num_epochs), desc=f'Num epochs={epoch}'):
+        for epoch in tqdm(range(self.num_epochs)):
             discarded_images = 0
             for img, caption in self.dataset:
                 # calculate the closest aspect ratio for the image
