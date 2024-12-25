@@ -224,6 +224,7 @@ if __name__ == '__main__':
                             global_step,
                             accelerator.unwrap_model(pipe),
                             validation_prompts)
+            accelerator.wait_for_everyone()
 
         with torch.no_grad():
             embeddings, attention_mask = extract_embeddings(captions, accelerator.unwrap_model(pipe))
