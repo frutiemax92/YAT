@@ -7,7 +7,8 @@ from torchvision.transforms import Resize, Compose, RandomCrop, RandomHorizontal
 import torch
 
 class BucketDataset(IterableDataset):
-    def __init__(self, 
+    def __init__(self,
+                 num_epochs, 
                  dataset,
                  batch_size,
                  aspect_ratios,
@@ -17,6 +18,7 @@ class BucketDataset(IterableDataset):
         self.batch_size = batch_size
         self.aspect_ratios = aspect_ratios
         self.discard_low_res = discard_low_res
+        self.num_epochs = num_epochs
     
     def find_closest_ratio(self, img):
         width = img.width
@@ -41,7 +43,7 @@ class BucketDataset(IterableDataset):
         pil_to_tensor = PILToTensor()
         # finally the buckets
         buckets = {}
-        while True:
+        for epoch in tqdm(range(self.num_epochs), desc=f'Num epochs={epoch}'):
             discarded_images = 0
             for img, caption in self.dataset:
                 # calculate the closest aspect ratio for the image

@@ -187,7 +187,10 @@ if __name__ == '__main__':
         aspect_ratio = ASPECT_RATIO_1024_BIN
     else:
         aspect_ratio = ASPECT_RATIO_2048_BIN
-    bucket_dataset = BucketDataset(dataset, batch_size, aspect_ratio)
+    bucket_dataset = BucketDataset(num_epochs,
+                                   dataset,
+                                   batch_size,
+                                   aspect_ratio)
 
     # batch collater that applies a transformation
     def collate_fn(samples):
@@ -212,32 +215,31 @@ if __name__ == '__main__':
     else:
         logger = None
     
-    for epoch in tqdm(range(num_epochs), desc='Num epochs'):
-        for images, captions in tqdm(dataloader):
-            images = torch.squeeze(images, dim=0)
-            if global_step % num_steps_per_validation == 0:
-                if accelerator.is_main_process:
-                    with torch.no_grad():
-                        validate(logger,
-                                global_step,
-                                accelerator.unwrap_model(pipe),
-                                validation_prompts)
+    for images, captions in tqdm(dataloader):
+        images = torch.squeeze(images, dim=0)
+        if global_step % num_steps_per_validation == 0:
+            if accelerator.is_main_process:
+                with torch.no_grad():
+                    validate(logger,
+                            global_step,
+                            accelerator.unwrap_model(pipe),
+                            validation_prompts)
 
-            with torch.no_grad():
-                embeddings, attention_mask = extract_embeddings(captions, accelerator.unwrap_model(pipe))
-                latents = extract_latents(images, accelerator.unwrap_model(pipe))
-            
-            optimize(logger,
-                     global_step,
-                     pipe,
-                     latents,
-                     embeddings,
-                     attention_mask,
-                     scheduler,
-                     optimizer,
-                     accelerator)
-            global_step = global_step + 1
-            flush()
+        with torch.no_grad():
+            embeddings, attention_mask = extract_embeddings(captions, accelerator.unwrap_model(pipe))
+            latents = extract_latents(images, accelerator.unwrap_model(pipe))
+        
+        optimize(logger,
+                    global_step,
+                    pipe,
+                    latents,
+                    embeddings,
+                    attention_mask,
+                    scheduler,
+                    optimizer,
+                    accelerator)
+        global_step = global_step + 1
+        flush()
     accelerator.wait_for_everyone()
 
     # final validation
