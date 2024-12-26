@@ -103,10 +103,11 @@ if __name__ == '__main__':
 
     parser.add_argument('--batch_size', required=True, type=int)
     parser.add_argument('--num_processes', required=False, type=int, default=1)
-    parser.add_argument('--pretrained_model_path',
+    parser.add_argument('--pretrained_pipe_path',
                         required=False,
                         type=str,
                         default='Efficient-Large-Model/Sana_600M_512px_diffusers')
+    parser.add_argument('--pretained_transformer_path', required=False, type=str, default=None)
     parser.add_argument('--learning_rate', required=False, type=float, default=1e-5)
     parser.add_argument('--num_epochs', required=False, type=int, default=5)
     parser.add_argument('--num_steps_per_validation', required=False, type=int, default=5000)
@@ -128,9 +129,10 @@ if __name__ == '__main__':
     # training parameters
     batch_size = args.batch_size
     num_processes = args.num_processes
-    pretrained_model_path = args.pretrained_model_path
+    pretrained_pipe_path = args.pretrained_pipe_path
     learning_rate = args.learning_rate
     num_epochs = args.num_epochs
+    pretrained_transformer_path = args.pretrained_transformer_path
     num_steps_per_validation = args.num_steps_per_validation
     validation_prompts = args.validation_prompts
     use_bfloat16 = args.bfloat16
@@ -151,7 +153,10 @@ if __name__ == '__main__':
         .to_tuple("jpg", "txt", handler=wds.warn_and_continue)  # Return image and text
     )
 
-    pipe = SanaPAGPipeline.from_pretrained(pretrained_model_path).to(torch.bfloat16)
+    pipe = SanaPAGPipeline.from_pretrained(pretrained_pipe_path).to(torch.bfloat16)
+    if pretrained_transformer_path != None:
+        transformer = SanaTransformer2DModel.from_pretrained(pretrained_transformer_path)
+        pipe.transformer = transformer
 
     # SANA transformer
     transformer = pipe.transformer
@@ -159,7 +164,7 @@ if __name__ == '__main__':
         transformer = transformer.to(torch.bfloat16)
 
     # scheduler
-    scheduler = DPMSolverMultistepScheduler.from_pretrained(pretrained_model_path, subfolder='scheduler')
+    scheduler = DPMSolverMultistepScheduler.from_pretrained(pretrained_pipe_path, subfolder='scheduler')
 
     # vae
     vae = pipe.vae
