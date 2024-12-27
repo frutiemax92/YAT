@@ -65,11 +65,12 @@ def optimize(logger : SummaryWriter,
     noisy_model_input = scheduler.scale_noise(latents, timesteps, noise)
 
     transformer = pipe.transformer
+    flush()
     with accelerator.accumulate(transformer):
         noise_pred = transformer(noisy_model_input.to(dtype=transformer.dtype),
-                                 encoder_hidden_states=embeddings,
+                                 encoder_hidden_states=embeddings.to(dtype=transformer.dtype),
                                  timestep=timesteps,
-                                 encoder_attention_mask=attention_mask).sample
+                                 encoder_attention_mask=attention_mask.to(dtype=transformer.dtype)).sample
         target = noise - latents
         loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
         accelerator.backward(loss)
@@ -135,10 +136,12 @@ if __name__ == '__main__':
                                 r2_bucket_name,
                                 r2_tar_files)
 
-    pipe = SanaPAGPipeline.from_pretrained(pretrained_pipe_path).to(torch.bfloat16)
+    pipe = SanaPAGPipeline.from_pretrained(pretrained_pipe_path)
     if pretrained_transformer_path != None:
         transformer = SanaTransformer2DModel.from_pretrained(pretrained_transformer_path)
         pipe.transformer = transformer
+    if use_bfloat16:
+        pipe = pipe.to(torch.bfloat16)
 
     # SANA transformer
     transformer = pipe.transformer
@@ -189,8 +192,8 @@ if __name__ == '__main__':
     accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps)
     # build the dataset
     dataset = (
-        wds.WebDataset(urls, handler=wds.warn_and_continue, nodesplitter=wds.split_by_node, workersplitter=wds.split_by_worker)
-        .shuffle(1000)
+        wds.WebDataset(urls, shardshuffle=True, handler=wds.warn_and_continue, nodesplitter=wds.split_by_node, workersplitter=wds.split_by_worker)
+        .shuffle(10)
         .decode("pil", handler=wds.warn_and_continue)  # Decode images as PIL objects
         .to_tuple(["jpg", 'jpeg'], "txt", handler=wds.warn_and_continue)  # Return image and text
     )
@@ -200,11 +203,12 @@ if __name__ == '__main__':
                                 aspect_ratio,
                                 accelerator,
                                 pipe)
-    dataloader = DataLoader(bucket_dataset, batch_size=None)
+    dataloader = DataLoader(bucket_dataset, batch_size=batch_size)
     
-    transformer, scheduler, vae, tokenizer, text_encoder, dataloader, optimizer = accelerator.prepare(
-        transformer, scheduler, vae, tokenizer, text_encoder, dataloader, optimizer
+    transformer, scheduler, vae, tokenizer, text_encoder, optimizer = accelerator.prepare(
+        transformer, scheduler, vae, tokenizer, text_encoder, optimizer
     )
+    dataloader = accelerator.prepare_data_loader(dataloader, device_placement=True)
     global_step = 0
 
     if accelerator.is_main_process:
@@ -213,6 +217,8 @@ if __name__ == '__main__':
         logger = None
     
     for latents, embeddings, attention_mask in tqdm(dataloader):
+        latents = torch.squeeze(latents, dim=1)
+        embeddings = torch.squeeze(embeddings, dim=1)
         if global_step % num_steps_per_validation == 0:
             if accelerator.is_main_process:
                 with torch.no_grad():

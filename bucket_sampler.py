@@ -40,7 +40,9 @@ class BucketDataset(IterableDataset):
         image_processor = self.pipe.image_processor
         images = image_processor.pil_to_numpy(images)
         images = torch.tensor(images, device=self.pipe.device, dtype=self.pipe.dtype)
-        images = image_processor.preprocess(torch.squeeze(images, dim=0))
+        #images = torch.squeeze(images, dim=0)
+        images = torch.swapaxes(images, 1, -1)
+        images = image_processor.preprocess(images)
         flush()
 
         output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
@@ -86,7 +88,15 @@ class BucketDataset(IterableDataset):
                     continue
 
                 resize_transform = Resize((height_target, width_target))
-                img = resize_transform(img)
+
+                try:
+                    img = resize_transform(img)
+                    if img.height != height_target or img.width != width_target:
+                        raise Exception('The resized image does not match the targetted size!')
+                        
+                except Exception as e:
+                    tqdm.write(f'Catched exception while resizing image: {e}')
+                    continue
 
                 # find if this bucket already exists
                 if not ratio in buckets.keys():
@@ -99,33 +109,28 @@ class BucketDataset(IterableDataset):
                         crop_transform = CenterCrop((height_target, width_target))
                         left_over_img = crop_transform(left_over_img)
                         buckets[ratio].append((left_over_img, left_over_caption))
+                buckets[ratio].append((img, caption))
 
-                # handle the case of batch size = 1???
-                if self.batch_size != 1:
-                    buckets[ratio].append((img, caption))
+                # check if the bucket is full
+                if len(buckets[ratio]) == self.batch_size:
+                    # some safety checks
+                    img_width = buckets[ratio][0][0].width
+                    img_height = buckets[ratio][0][0].height
+                    for bucket in buckets[ratio]:
+                        if bucket[0].width != img_width or bucket[0].height != img_height:
+                            # bad bucket, throw that one in the garbage!
+                            tqdm.write('Caught a bad bucket!')
+                            buckets.pop(ratio)
+                            continue
 
-                # check if any bucket is full
-                keys_to_remove = []
-                for key, bucket in buckets.items():
-                    if len(bucket) == self.batch_size:
-                        # transform the PIL image to a tensor
-                        images = []
-                        captions = []
-                        for elem in bucket:
-                            img, caption = elem
-                            images.append(pil_to_tensor(img))
-                            captions.append(caption)
-                        
-                        # compute the latents and embedding
+                    # transform the PIL image to a tensor
+                    for elem in buckets[ratio]:
+                        img_tmp, caption_tmp = elem
                         with torch.no_grad():
-                            latents = self.extract_latents(torch.stack(images))
-                            embeddings, prompt_attention_mask = self.extract_embeddings(captions)
-                        
-                        yield latents, embeddings, prompt_attention_mask
-                        keys_to_remove.append(key)
-
-                for key in keys_to_remove:
-                    buckets.pop(key)
+                            latent = self.extract_latents(img_tmp)
+                            embeddings, prompt_attention_mask = self.extract_embeddings(caption_tmp)
+                        yield latent, embeddings, prompt_attention_mask
+                    buckets.pop(ratio)
     
             # check for left overs
             for key, bucket in buckets.items():
