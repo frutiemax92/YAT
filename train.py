@@ -74,8 +74,8 @@ def optimize(logger : SummaryWriter,
              accelerator : Accelerator):
     loss_fn = torch.nn.MSELoss()
     noise = randn_tensor(latents.shape, device=pipe.device, dtype=pipe.dtype)
-    timestep = torch.tensor(random.choice(scheduler.timesteps)).to(device=latents.device)
-    timesteps = timestep.expand(batch_size)
+
+    timesteps = torch.tensor([random.choice(scheduler.timesteps) for i in range(batch_size)])
     noisy_model_input = scheduler.add_noise(latents, noise, timesteps)
 
     transformer = pipe.transformer
@@ -107,7 +107,7 @@ if __name__ == '__main__':
                         required=False,
                         type=str,
                         default='Efficient-Large-Model/Sana_600M_512px_diffusers')
-    parser.add_argument('--pretained_transformer_path', required=False, type=str, default=None)
+    parser.add_argument('--pretrained_transformer_path', required=False, type=str, default=None)
     parser.add_argument('--learning_rate', required=False, type=float, default=1e-5)
     parser.add_argument('--num_epochs', required=False, type=int, default=5)
     parser.add_argument('--num_steps_per_validation', required=False, type=int, default=5000)
@@ -132,11 +132,14 @@ if __name__ == '__main__':
     pretrained_pipe_path = args.pretrained_pipe_path
     learning_rate = args.learning_rate
     num_epochs = args.num_epochs
+
     pretrained_transformer_path = args.pretrained_transformer_path
+
     num_steps_per_validation = args.num_steps_per_validation
     validation_prompts = args.validation_prompts
     use_bfloat16 = args.bfloat16
     gradient_accumulation_steps = args.gradient_accumulation_steps
+
     output_repo = args.output_repo
 
     if urls == None:
@@ -192,10 +195,6 @@ if __name__ == '__main__':
         aspect_ratio = ASPECT_RATIO_1024_BIN
     else:
         aspect_ratio = ASPECT_RATIO_2048_BIN
-    bucket_dataset = BucketDataset(num_epochs,
-                                   dataset,
-                                   batch_size,
-                                   aspect_ratio)
 
     # batch collater that applies a transformation
     def collate_fn(samples):
@@ -206,10 +205,16 @@ if __name__ == '__main__':
     
     # optimizer
     optimizer = AdamW(transformer.parameters(), lr=learning_rate)
-    dataloader = DataLoader(bucket_dataset, batch_size=None)
 
     # multi-gpu training
     accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps)
+    bucket_dataset = BucketDataset(num_epochs,
+                                dataset,
+                                batch_size,
+                                aspect_ratio,
+                                accelerator)
+    dataloader = DataLoader(bucket_dataset, batch_size=None)
+    
     transformer, scheduler, vae, tokenizer, text_encoder, optimizer = accelerator.prepare(
         transformer, scheduler, vae, tokenizer, text_encoder, optimizer
     )
@@ -250,10 +255,11 @@ if __name__ == '__main__':
     accelerator.wait_for_everyone()
 
     # final validation
-    validate(logger,
-        global_step,
-        accelerator.unwrap_model(pipe),
-        validation_prompts)
-    
-    if output_repo != None:
-        transformer.push_to_hub(output_repo)
+    if accelerator.is_main_process:
+        validate(logger,
+            global_step,
+            accelerator.unwrap_model(pipe),
+            validation_prompts)
+        
+        if output_repo != None:
+            transformer.push_to_hub(output_repo)
