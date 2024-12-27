@@ -6,6 +6,12 @@ from copy import copy
 from torchvision.transforms import Resize, Compose, RandomCrop, RandomHorizontalFlip, CenterCrop, PILToTensor
 import torch
 from accelerate import Accelerator
+from diffusers import SanaPAGPipeline
+import gc
+
+def flush():
+    gc.collect()
+    torch.cuda.empty_cache()
 
 class BucketDataset(IterableDataset):
     def __init__(self,
@@ -14,6 +20,7 @@ class BucketDataset(IterableDataset):
                  batch_size,
                  aspect_ratios,
                  accelerator : Accelerator,
+                 pipe : SanaPAGPipeline,
                  discard_low_res=True):
         super().__init__()
         self.dataset = dataset
@@ -22,7 +29,23 @@ class BucketDataset(IterableDataset):
         self.discard_low_res = discard_low_res
         self.num_epochs = num_epochs
         self.accelerator = accelerator
+        self.pipe = pipe
     
+    def extract_embeddings(self, captions : list[str]):
+        prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
+            self.pipe.encode_prompt(captions, do_classifier_free_guidance=False)
+        return prompt_embeds, prompt_attention_mask
+
+    def extract_latents(self, images : torch.Tensor):
+        image_processor = self.pipe.image_processor
+        images = image_processor.pil_to_numpy(images)
+        images = torch.tensor(images, device=self.pipe.device, dtype=self.pipe.dtype)
+        images = image_processor.preprocess(torch.squeeze(images, dim=0))
+        flush()
+
+        output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
+        return output * self.pipe.vae.config.scaling_factor
+
     def find_closest_ratio(self, img):
         width = img.width
         height = img.height
@@ -92,7 +115,13 @@ class BucketDataset(IterableDataset):
                             img, caption = elem
                             images.append(pil_to_tensor(img))
                             captions.append(caption)
-                        yield torch.stack(images), captions
+                        
+                        # compute the latents and embedding
+                        with torch.no_grad():
+                            latents = self.extract_latents(torch.stack(images))
+                            embeddings, prompt_attention_mask = self.extract_embeddings(captions)
+                        
+                        yield latents, embeddings, prompt_attention_mask
                         keys_to_remove.append(key)
 
                 for key in keys_to_remove:
@@ -111,4 +140,3 @@ class BucketDataset(IterableDataset):
             # finally reinitialize the buckets and wait for all the processes to come by
             buckets = {}
             discarded_images = 0
-            self.accelerator.wait_for_everyone()

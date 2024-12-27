@@ -19,28 +19,12 @@ from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
 from cloudflare import get_secured_urls
 import random
+import datetime
 import gc
 
 def flush():
     gc.collect()
     torch.cuda.empty_cache()
-
-def extract_embeddings(captions : list[str],
-                       pipe : SanaPAGPipeline):
-    prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
-        pipe.encode_prompt(captions, do_classifier_free_guidance=False)
-    return prompt_embeds, prompt_attention_mask
-
-def extract_latents(images : torch.Tensor,
-                    pipe : SanaPAGPipeline):
-    image_processor = pipe.image_processor
-    images = image_processor.pil_to_numpy(images)
-    images = torch.tensor(images, device=pipe.device, dtype=pipe.dtype)
-    images = image_processor.preprocess(torch.squeeze(images, dim=0))
-    flush()
-
-    output = pipe.vae.encode(images.to(device=pipe.vae.device, dtype=pipe.vae.dtype)).latent
-    return output * pipe.vae.config.scaling_factor
 
 def validate(logger : SummaryWriter,
              global_step: int,
@@ -69,14 +53,16 @@ def optimize(logger : SummaryWriter,
              latents : torch.Tensor,
              embeddings : torch.Tensor,
              attention_mask : torch.Tensor,
-             scheduler : DPMSolverMultistepScheduler,
+             scheduler : FlowMatchEulerDiscreteScheduler,
              optimizer : AdamW,
              accelerator : Accelerator):
     loss_fn = torch.nn.MSELoss()
     noise = randn_tensor(latents.shape, device=pipe.device, dtype=pipe.dtype)
 
-    timesteps = torch.tensor([random.choice(scheduler.timesteps) for i in range(batch_size)])
-    noisy_model_input = scheduler.add_noise(latents, noise, timesteps)
+    u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=1.29)
+    indices = (u * scheduler.config.num_train_timesteps).long()
+    timesteps = scheduler.timesteps[indices].to(latents.device)
+    noisy_model_input = scheduler.scale_noise(latents, timesteps, noise)
 
     transformer = pipe.transformer
     with accelerator.accumulate(transformer):
@@ -148,13 +134,6 @@ if __name__ == '__main__':
                                 r2_endpoint,
                                 r2_bucket_name,
                                 r2_tar_files)
-    # build the dataset
-    dataset = (
-        wds.WebDataset(urls, handler=wds.warn_and_continue, nodesplitter=wds.split_by_node, workersplitter=wds.split_by_worker)
-        .shuffle(1000, handler=wds.warn_and_continue)  # Shuffle across all shards
-        .decode("pil", handler=wds.warn_and_continue)  # Decode images as PIL objects
-        .to_tuple("jpg", "txt", handler=wds.warn_and_continue)  # Return image and text
-    )
 
     pipe = SanaPAGPipeline.from_pretrained(pretrained_pipe_path).to(torch.bfloat16)
     if pretrained_transformer_path != None:
@@ -167,7 +146,7 @@ if __name__ == '__main__':
         transformer = transformer.to(torch.bfloat16)
 
     # scheduler
-    scheduler = DPMSolverMultistepScheduler.from_pretrained(pretrained_pipe_path, subfolder='scheduler')
+    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(pretrained_pipe_path, subfolder='scheduler')
 
     # vae
     vae = pipe.vae
@@ -208,15 +187,23 @@ if __name__ == '__main__':
 
     # multi-gpu training
     accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps)
+    # build the dataset
+    dataset = (
+        wds.WebDataset(urls, handler=wds.warn_and_continue, nodesplitter=wds.split_by_node, workersplitter=wds.split_by_worker)
+        .shuffle(1000)
+        .decode("pil", handler=wds.warn_and_continue)  # Decode images as PIL objects
+        .to_tuple(["jpg", 'jpeg'], "txt", handler=wds.warn_and_continue)  # Return image and text
+    )
     bucket_dataset = BucketDataset(num_epochs,
                                 dataset,
                                 batch_size,
                                 aspect_ratio,
-                                accelerator)
+                                accelerator,
+                                pipe)
     dataloader = DataLoader(bucket_dataset, batch_size=None)
     
-    transformer, scheduler, vae, tokenizer, text_encoder, optimizer = accelerator.prepare(
-        transformer, scheduler, vae, tokenizer, text_encoder, optimizer
+    transformer, scheduler, vae, tokenizer, text_encoder, dataloader, optimizer = accelerator.prepare(
+        transformer, scheduler, vae, tokenizer, text_encoder, dataloader, optimizer
     )
     global_step = 0
 
@@ -225,21 +212,14 @@ if __name__ == '__main__':
     else:
         logger = None
     
-    for images, captions in tqdm(dataloader):
-        images = torch.squeeze(images, dim=0)
+    for latents, embeddings, attention_mask in tqdm(dataloader):
         if global_step % num_steps_per_validation == 0:
-            accelerator.wait_for_everyone()
             if accelerator.is_main_process:
                 with torch.no_grad():
                     validate(logger,
                             global_step,
                             accelerator.unwrap_model(pipe),
                             validation_prompts)
-            accelerator.wait_for_everyone()
-
-        with torch.no_grad():
-            embeddings, attention_mask = extract_embeddings(captions, accelerator.unwrap_model(pipe))
-            latents = extract_latents(images, accelerator.unwrap_model(pipe))
         
         optimize(logger,
                     global_step,
