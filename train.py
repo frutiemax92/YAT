@@ -20,6 +20,7 @@ from diffusers.utils.torch_utils import randn_tensor
 from cloudflare import get_secured_urls
 import random
 import datetime
+from webdataset.utils import pytorch_worker_info
 import gc
 
 def flush():
@@ -192,8 +193,16 @@ if __name__ == '__main__':
     #dataloader_config = DataLoaderConfiguration(dispatch_batches=True)
     accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps)
     # build the dataset
+    def split_only_on_main(src, group=None):
+        """Split the input sequence by PyTorch distributed rank."""
+        rank, world_size, worker, num_workers = pytorch_worker_info(group=group)
+        if rank == 0:
+            yield from src
+        else:
+            yield None
+
     dataset = (
-        wds.WebDataset(urls, shardshuffle=True, handler=wds.warn_and_continue)
+        wds.WebDataset(urls, shardshuffle=True, handler=wds.warn_and_continue, nodesplitter=split_only_on_main)
         .shuffle(10)
         .decode("pil", handler=wds.warn_and_continue)  # Decode images as PIL objects
         .to_tuple(["jpg", 'jpeg'], "txt", handler=wds.warn_and_continue)  # Return image and text
