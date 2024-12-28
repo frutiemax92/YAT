@@ -193,7 +193,7 @@ if __name__ == '__main__':
     accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps)
     # build the dataset
     dataset = (
-        wds.WebDataset(urls, shardshuffle=True, handler=wds.warn_and_continue, nodesplitter=wds.split_by_node, workersplitter=wds.split_by_worker)
+        wds.WebDataset(urls, shardshuffle=True, handler=wds.warn_and_continue)
         .shuffle(10)
         .decode("pil", handler=wds.warn_and_continue)  # Decode images as PIL objects
         .to_tuple(["jpg", 'jpeg'], "txt", handler=wds.warn_and_continue)  # Return image and text
@@ -205,11 +205,12 @@ if __name__ == '__main__':
                                 accelerator,
                                 pipe)
     dataloader = DataLoader(bucket_dataset, batch_size=batch_size)
+    dataloader = accelerator.prepare_data_loader(dataloader, device_placement=True)
     
     transformer, scheduler, vae, tokenizer, text_encoder, optimizer = accelerator.prepare(
         transformer, scheduler, vae, tokenizer, text_encoder, optimizer
     )
-    dataloader = accelerator.prepare_data_loader(dataloader, device_placement=True)
+    
     global_step = 0
 
     if accelerator.is_main_process:

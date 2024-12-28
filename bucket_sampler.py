@@ -38,10 +38,6 @@ class BucketDataset(IterableDataset):
 
     def extract_latents(self, images : torch.Tensor):
         image_processor = self.pipe.image_processor
-        images = image_processor.pil_to_numpy(images)
-        images = torch.tensor(images, device=self.pipe.device, dtype=self.pipe.dtype)
-        #images = torch.squeeze(images, dim=0)
-        images = torch.swapaxes(images, 1, -1)
         images = image_processor.preprocess(images)
         flush()
 
@@ -49,8 +45,8 @@ class BucketDataset(IterableDataset):
         return output * self.pipe.vae.config.scaling_factor
 
     def find_closest_ratio(self, img):
-        width = img.width
-        height = img.height
+        width = img.shape[-1]
+        height = img.shape[-2]
         ratio = height / width
 
         # find the closest ratio from the aspect ratios table
@@ -74,12 +70,16 @@ class BucketDataset(IterableDataset):
         for epoch in tqdm(range(self.num_epochs)):
             discarded_images = 0
             for img, caption in self.dataset:
+                img = self.pipe.image_processor.pil_to_numpy(img)
+                img = torch.tensor(img).to(dtype=self.pipe.dtype, device=self.pipe.device)
+                img = torch.moveaxis(img, -1, 1)
+            
                 # calculate the closest aspect ratio for the image
                 ratio = self.find_closest_ratio(img)
                 height_target = int(self.aspect_ratios[ratio][0])
                 width_target = int(self.aspect_ratios[ratio][1])
-                width = img.width
-                height = img.height
+                width = img.shape[-1]
+                height = img.shape[-2]
 
                 # check if we discard this image due to a too low resolution
                 if height_target > height and width_target > width and self.discard_low_res:
@@ -88,15 +88,7 @@ class BucketDataset(IterableDataset):
                     continue
 
                 resize_transform = Resize((height_target, width_target))
-
-                try:
-                    img = resize_transform(img)
-                    if img.height != height_target or img.width != width_target:
-                        raise Exception('The resized image does not match the targetted size!')
-                        
-                except Exception as e:
-                    tqdm.write(f'Catched exception while resizing image: {e}')
-                    continue
+                img = resize_transform(img)
 
                 # find if this bucket already exists
                 if not ratio in buckets.keys():
@@ -113,16 +105,6 @@ class BucketDataset(IterableDataset):
 
                 # check if the bucket is full
                 if len(buckets[ratio]) == self.batch_size:
-                    # some safety checks
-                    img_width = buckets[ratio][0][0].width
-                    img_height = buckets[ratio][0][0].height
-                    for bucket in buckets[ratio]:
-                        if bucket[0].width != img_width or bucket[0].height != img_height:
-                            # bad bucket, throw that one in the garbage!
-                            tqdm.write('Caught a bad bucket!')
-                            buckets.pop(ratio)
-                            continue
-
                     # transform the PIL image to a tensor
                     for elem in buckets[ratio]:
                         img_tmp, caption_tmp = elem
