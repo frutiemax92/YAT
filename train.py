@@ -203,7 +203,7 @@ if __name__ == '__main__':
 
     dataset = (
         wds.WebDataset(urls, shardshuffle=True, handler=wds.warn_and_continue, nodesplitter=split_only_on_main)
-        .shuffle(10)
+        .shuffle(1000)
         .decode("pil", handler=wds.warn_and_continue)  # Decode images as PIL objects
         .to_tuple(["jpg", 'jpeg'], "txt", handler=wds.warn_and_continue)  # Return image and text
     )
