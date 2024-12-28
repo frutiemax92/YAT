@@ -6,7 +6,7 @@ from bucket_sampler import BucketDataset
 from torch.utils.data import DataLoader, Subset
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_256_BIN, ASPECT_RATIO_512_BIN, ASPECT_RATIO_1024_BIN
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_2048_BIN
-from accelerate import Accelerator
+from accelerate import Accelerator, DataLoaderConfiguration
 from diffusers import SanaTransformer2DModel, DDPMScheduler, AutoencoderDC, FlowMatchEulerDiscreteScheduler, DPMSolverMultistepScheduler
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from diffusers.training_utils import compute_density_for_timestep_sampling
@@ -189,6 +189,7 @@ if __name__ == '__main__':
     optimizer = AdamW(transformer.parameters(), lr=learning_rate)
 
     # multi-gpu training
+    #dataloader_config = DataLoaderConfiguration(dispatch_batches=True)
     accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps)
     # build the dataset
     dataset = (

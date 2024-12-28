@@ -24,7 +24,7 @@ class BucketDataset(IterableDataset):
                  discard_low_res=True):
         super().__init__()
         self.dataset = dataset
-        self.batch_size = batch_size
+        self.batch_size = batch_size * accelerator.num_processes
         self.aspect_ratios = aspect_ratios
         self.discard_low_res = discard_low_res
         self.num_epochs = num_epochs
