@@ -15,7 +15,6 @@ def flush():
 
 class BucketDataset(IterableDataset):
     def __init__(self,
-                 num_epochs, 
                  dataset,
                  batch_size,
                  aspect_ratios,
@@ -27,7 +26,6 @@ class BucketDataset(IterableDataset):
         self.batch_size = batch_size * accelerator.num_processes
         self.aspect_ratios = aspect_ratios
         self.discard_low_res = discard_low_res
-        self.num_epochs = num_epochs
         self.accelerator = accelerator
         self.pipe = pipe
     
@@ -64,12 +62,13 @@ class BucketDataset(IterableDataset):
     def __iter__(self):
         # those are the left over images that didn't fit in any batch in the last epoch
         left_overs = []
-        pil_to_tensor = PILToTensor()
         # finally the buckets
         buckets = {}
-        for epoch in tqdm(range(self.num_epochs)):
+        images_count = 0
+        while True:
             discarded_images = 0
             for img, caption in self.dataset:
+                images_count = images_count + 1
                 img = self.pipe.image_processor.pil_to_numpy(img)
                 img = torch.tensor(img).to(dtype=self.pipe.dtype, device=self.pipe.device)
                 img = torch.moveaxis(img, -1, 1)

@@ -14,7 +14,7 @@ from torch.optim.adamw import AdamW
 from torch.utils.tensorboard import SummaryWriter
 from diffusers import SanaPAGPipeline
 import torch
-from tqdm import tqdm
+import tqdm
 from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
 from cloudflare import get_secured_urls
@@ -97,7 +97,7 @@ if __name__ == '__main__':
                         default='Efficient-Large-Model/Sana_600M_512px_diffusers')
     parser.add_argument('--pretrained_transformer_path', required=False, type=str, default=None)
     parser.add_argument('--learning_rate', required=False, type=float, default=1e-5)
-    parser.add_argument('--num_epochs', required=False, type=int, default=5)
+    parser.add_argument('--steps', required=True, type=int)
     parser.add_argument('--num_steps_per_validation', required=False, type=int, default=5000)
     parser.add_argument('--validation_prompts', required=True, nargs='+', type=str)
     parser.add_argument('--urls', required=False, nargs='+', type=str, default=None)
@@ -119,7 +119,7 @@ if __name__ == '__main__':
     num_processes = args.num_processes
     pretrained_pipe_path = args.pretrained_pipe_path
     learning_rate = args.learning_rate
-    num_epochs = args.num_epochs
+    num_steps = args.steps
 
     pretrained_transformer_path = args.pretrained_transformer_path
 
@@ -208,8 +208,7 @@ if __name__ == '__main__':
         .to_tuple(["jpg", 'jpeg'], "txt", handler=wds.warn_and_continue)  # Return image and text
     for url in urls]
     mix = wds.RandomMix(datasets)
-    bucket_dataset = BucketDataset(num_epochs,
-                                mix,
+    bucket_dataset = BucketDataset(mix,
                                 batch_size,
                                 aspect_ratio,
                                 accelerator,
@@ -228,6 +227,8 @@ if __name__ == '__main__':
     else:
         logger = None
     
+    global_step = 0
+    progress_bar = tqdm.tqdm(total=num_steps, desc='Num Steps:')
     for latents, embeddings, attention_mask in tqdm(dataloader):
         latents = torch.squeeze(latents, dim=1)
         embeddings = torch.squeeze(embeddings, dim=1)
@@ -249,8 +250,8 @@ if __name__ == '__main__':
                     optimizer,
                     accelerator)
         global_step = global_step + 1
-        flush()
-    accelerator.wait_for_everyone()
+        progress_bar.update(1)
+        
 
     # final validation
     if accelerator.is_main_process:
