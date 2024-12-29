@@ -137,7 +137,7 @@ if __name__ == '__main__':
                                 r2_bucket_name,
                                 r2_tar_files)
 
-    pipe = SanaPAGPipeline.from_pretrained(pretrained_pipe_path)
+    pipe = SanaPAGPipeline.from_pretrained(pretrained_pipe_path, pag_applied_layers=[f"transformer_blocks.{i}" for i in range(8, 9)])
     if pretrained_transformer_path != None:
         transformer = SanaTransformer2DModel.from_pretrained(pretrained_transformer_path)
         pipe.transformer = transformer
