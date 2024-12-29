@@ -37,7 +37,7 @@ class BucketDataset(IterableDataset):
 
     def extract_latents(self, images : torch.Tensor):
         image_processor = self.pipe.image_processor
-        images = image_processor.preprocess(images.to(self.accelerator.device))
+        images = image_processor.preprocess(images)
         flush()
 
         output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
