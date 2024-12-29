@@ -37,7 +37,7 @@ class BucketDataset(IterableDataset):
 
     def extract_latents(self, images : torch.Tensor):
         image_processor = self.pipe.image_processor
-        images = image_processor.preprocess(images)
+        images = image_processor.preprocess(images.to(self.accelerator.device))
         flush()
 
         output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
@@ -61,9 +61,6 @@ class BucketDataset(IterableDataset):
         return str(target_ratio)
 
     def __iter__(self):
-        # those are the left over images that didn't fit in any batch in the last epoch
-        left_overs = []
-        # finally the buckets
         buckets = {}
         images_count = 0
         while True:
@@ -71,7 +68,7 @@ class BucketDataset(IterableDataset):
             for img, caption in self.dataset:
                 images_count = images_count + 1
                 img = self.pipe.image_processor.pil_to_numpy(img)
-                img = torch.tensor(img).to(dtype=self.pipe.dtype, device=self.pipe.device)
+                img = torch.tensor(img).to(dtype=self.pipe.dtype)
                 img = torch.moveaxis(img, -1, 1)
             
                 # calculate the closest aspect ratio for the image
@@ -93,14 +90,6 @@ class BucketDataset(IterableDataset):
                 # find if this bucket already exists
                 if not ratio in buckets.keys():
                     buckets[ratio] = []
-
-                    # also push a left over from the last epoch if any
-                    if len(left_overs) != 0:
-                        left_over = left_overs.pop()
-                        left_over_img, left_over_caption = left_over
-                        crop_transform = CenterCrop((height_target, width_target))
-                        left_over_img = crop_transform(left_over_img)
-                        buckets[ratio].append((left_over_img, left_over_caption))
                 buckets[ratio].append((img, caption))
 
                 # check if the bucket is full
@@ -121,17 +110,3 @@ class BucketDataset(IterableDataset):
                             images_tmp.clear()
                             captions_tmp.clear()
                     buckets.pop(ratio)
-    
-            # check for left overs
-            for key, bucket in buckets.items():
-                if len(bucket) != 0:
-                    left_overs.extend(bucket)
-            
-            # print some statistics
-            if self.discard_low_res:
-                tqdm.write(f'There were {discarded_images} low resolution images in this epoch')
-            tqdm.write(f'There are {len(left_overs)} images from this epoch that did not fit in any bucket')
-
-            # finally reinitialize the buckets and wait for all the processes to come by
-            buckets = {}
-            discarded_images = 0
