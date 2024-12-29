@@ -209,7 +209,7 @@ if __name__ == '__main__':
                                 aspect_ratio,
                                 accelerator,
                                 pipe)
-    dataloader = DataLoader(bucket_dataset, batch_size=batch_size)
+    dataloader = DataLoader(bucket_dataset, batch_size=None)
     dataloader = accelerator.prepare_data_loader(dataloader)
     
     transformer, scheduler, vae, tokenizer, text_encoder, optimizer = accelerator.prepare(
@@ -226,8 +226,6 @@ if __name__ == '__main__':
     global_step = 0
     progress_bar = tqdm.tqdm(total=num_steps, desc='Num Steps')
     for latents, embeddings, attention_mask in dataloader:
-        latents = torch.squeeze(latents, dim=1)
-        embeddings = torch.squeeze(embeddings, dim=1)
         if global_step % num_steps_per_validation == 0:
             if accelerator.is_main_process:
                 with torch.no_grad():

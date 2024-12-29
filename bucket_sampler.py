@@ -23,7 +23,8 @@ class BucketDataset(IterableDataset):
                  discard_low_res=False):
         super().__init__()
         self.dataset = dataset
-        self.batch_size = batch_size * accelerator.num_processes
+        self.total_batch_size = batch_size * accelerator.num_processes
+        self.batch_size = batch_size
         self.aspect_ratios = aspect_ratios
         self.discard_low_res = discard_low_res
         self.accelerator = accelerator
@@ -103,14 +104,22 @@ class BucketDataset(IterableDataset):
                 buckets[ratio].append((img, caption))
 
                 # check if the bucket is full
-                if len(buckets[ratio]) == self.batch_size:
+                if len(buckets[ratio]) == self.total_batch_size:
                     # transform the PIL image to a tensor
+                    images_tmp = []
+                    captions_tmp = []
                     for elem in buckets[ratio]:
                         img_tmp, caption_tmp = elem
-                        with torch.no_grad():
-                            latent = self.extract_latents(img_tmp)
-                            embeddings, prompt_attention_mask = self.extract_embeddings(caption_tmp)
-                        yield latent, embeddings, prompt_attention_mask
+                        images_tmp.append(img_tmp)
+                        captions_tmp.append(caption_tmp)
+
+                        if len(images_tmp) == self.batch_size:
+                            with torch.no_grad():
+                                latents = self.extract_latents(images_tmp)
+                                embeddings, prompt_attention_masks = self.extract_embeddings(captions_tmp)
+                            yield latents, embeddings, prompt_attention_masks
+                            images_tmp.clear()
+                            captions_tmp.clear()
                     buckets.pop(ratio)
     
             # check for left overs
