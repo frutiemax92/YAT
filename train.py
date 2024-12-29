@@ -34,7 +34,7 @@ def validate(logger : SummaryWriter,
     pil_to_tensor = PILToTensor()
     idx = 0
     generator=torch.Generator(device="cuda").manual_seed(42)
-    for prompt in tqdm(validation_prompts, desc='Generating validation images'):
+    for prompt in tqdm.tqdm(validation_prompts, desc='Generating validation images'):
         image = pipe(
             prompt=prompt,
             guidance_scale=5.0,
@@ -196,14 +196,10 @@ if __name__ == '__main__':
     def split_only_on_main(src, group=None):
         """Split the input sequence by PyTorch distributed rank."""
         rank, world_size, worker, num_workers = pytorch_worker_info(group=group)
-        if rank == 0:
-            yield from src
-        else:
-            yield None
+        yield from src
 
     datasets = [
-        wds.WebDataset(url, shardshuffle=True, handler=wds.warn_and_continue, nodesplitter=split_only_on_main)
-        .shuffle(1000)
+        wds.WebDataset(url, shardshuffle=1000, handler=wds.warn_and_continue, nodesplitter=split_only_on_main)
         .decode("pil", handler=wds.warn_and_continue)  # Decode images as PIL objects
         .to_tuple(["jpg", 'jpeg'], "txt", handler=wds.warn_and_continue)  # Return image and text
     for url in urls]
@@ -214,7 +210,7 @@ if __name__ == '__main__':
                                 accelerator,
                                 pipe)
     dataloader = DataLoader(bucket_dataset, batch_size=batch_size)
-    dataloader = accelerator.prepare_data_loader(dataloader, device_placement=True)
+    dataloader = accelerator.prepare_data_loader(dataloader)
     
     transformer, scheduler, vae, tokenizer, text_encoder, optimizer = accelerator.prepare(
         transformer, scheduler, vae, tokenizer, text_encoder, optimizer
@@ -228,8 +224,8 @@ if __name__ == '__main__':
         logger = None
     
     global_step = 0
-    progress_bar = tqdm.tqdm(total=num_steps, desc='Num Steps:')
-    for latents, embeddings, attention_mask in tqdm(dataloader):
+    progress_bar = tqdm.tqdm(total=num_steps, desc='Num Steps')
+    for latents, embeddings, attention_mask in dataloader:
         latents = torch.squeeze(latents, dim=1)
         embeddings = torch.squeeze(embeddings, dim=1)
         if global_step % num_steps_per_validation == 0:

@@ -20,7 +20,7 @@ class BucketDataset(IterableDataset):
                  aspect_ratios,
                  accelerator : Accelerator,
                  pipe : SanaPAGPipeline,
-                 discard_low_res=True):
+                 discard_low_res=False):
         super().__init__()
         self.dataset = dataset
         self.batch_size = batch_size * accelerator.num_processes
