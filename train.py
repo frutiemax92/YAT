@@ -201,14 +201,15 @@ if __name__ == '__main__':
         else:
             yield None
 
-    dataset = (
-        wds.WebDataset(urls, shardshuffle=True, handler=wds.warn_and_continue, nodesplitter=split_only_on_main)
+    datasets = [
+        wds.WebDataset(url, shardshuffle=True, handler=wds.warn_and_continue, nodesplitter=split_only_on_main)
         .shuffle(1000)
         .decode("pil", handler=wds.warn_and_continue)  # Decode images as PIL objects
         .to_tuple(["jpg", 'jpeg'], "txt", handler=wds.warn_and_continue)  # Return image and text
-    )
+    for url in urls]
+    mix = wds.RandomMix(datasets)
     bucket_dataset = BucketDataset(num_epochs,
-                                dataset,
+                                mix,
                                 batch_size,
                                 aspect_ratio,
                                 accelerator,
