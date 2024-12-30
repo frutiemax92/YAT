@@ -15,7 +15,11 @@ from common.trainer import Trainer
 class PixartSigmaTrainer(Trainer):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
-        self.pipe = PixArtSigmaPipeline.from_pretrained(params.pretrained_pipe_path)
+
+        if params.bfloat16:
+            self.pipe = PixArtSigmaPipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16)
+        else:
+            self.pipe = PixArtSigmaPipeline.from_pretrained(params.pretrained_pipe_path)
         if params.pretrained_model_path != None:
             transformer = PixArtSigmaPipeline.from_pretrained(params.pretrained_model_path)
             self.pipe.transformer = transformer
@@ -38,6 +42,8 @@ class PixartSigmaTrainer(Trainer):
         self.optimizer = AdamW(self.pipe.transformer.parameters(), lr=params.learning_rate)
         if params.bfloat16:
             self.pipe = self.pipe.to(torch.bfloat16)
+            self.pipe.transformer = self.pipe.transformer.to(torch.bfloat16)
+        
     
     def initialize(self):
         super().initialize()
@@ -51,7 +57,7 @@ class PixartSigmaTrainer(Trainer):
     def extract_latents(self, images):
         image_processor = self.pipe.image_processor
         images = image_processor.preprocess(images)
-        output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
+        output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent_dist.sample()
         return output * self.pipe.vae.config.scaling_factor
 
     def extract_embeddings(self, captions):
@@ -70,8 +76,10 @@ class PixartSigmaTrainer(Trainer):
                 guidance_scale=5.0,
                 num_inference_steps=20,
                 generator=generator,
-            )[0]
-            self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image[0]), self.global_step)
+                output_type='latent').images
+            image = self.pipe.vae.decode(image.to(self.pipe.dtype) / self.pipe.vae.config.scaling_factor, return_dict=False)[0]
+            image = self.pipe.image_processor.postprocess(image, output_type='pt')[0]
+            self.logger.add_image(f'validation/{idx}/{prompt}', image, self.global_step)
             idx = idx + 1
         
         # save the transformer
@@ -95,7 +103,7 @@ class PixartSigmaTrainer(Trainer):
             noise_pred = transformer(noisy_model_input.to(dtype=transformer.dtype),
                                     encoder_hidden_states=embeddings.to(dtype=transformer.dtype),
                                     timestep=timesteps,
-                                    encoder_attention_mask=attention_mask.to(dtype=transformer.dtype)).sample
+                                    encoder_attention_mask=attention_mask.to(dtype=transformer.dtype)).sample.chunk(2, 1)[0]
             target = noise
             loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
             self.accelerator.backward(loss)

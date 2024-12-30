@@ -70,8 +70,9 @@ class Trainer:
         while self.global_step < params.steps:
             for batch in self.dataloader:
                 if self.global_step % params.num_steps_per_validation == 0:
-                    with torch.no_grad():
-                        self.validate()
+                    if self.accelerator.is_main_process:
+                        with torch.no_grad():
+                            self.validate()
                 self.optimize(batch)
                 self.global_step = self.global_step + 1
                 progress_bar.update(1)
