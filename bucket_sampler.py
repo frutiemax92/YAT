@@ -35,10 +35,10 @@ class BucketDataset(IterableDataset):
         self.extract_latents_handler = extract_latents_handler
     
     def extract_embeddings(self, captions : list[str]):
-        return self.extract_embeddings_handler(self.pipe, captions)
+        return self.extract_embeddings_handler(captions)
 
     def extract_latents(self, images : torch.Tensor):
-        return self.extract_latents_handler(self.pipe, images)
+        return self.extract_latents_handler(images)
 
     def find_closest_ratio(self, img):
         width = img.shape[-1]
