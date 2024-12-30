@@ -151,13 +151,6 @@ if __name__ == '__main__':
         aspect_ratio = ASPECT_RATIO_1024_BIN
     else:
         aspect_ratio = ASPECT_RATIO_2048_BIN
-
-    # batch collater that applies a transformation
-    def collate_fn(samples):
-        # Unpack individual samples into images and captions
-        images = torch.stack([sample[0][0] for sample in samples])  # List of PIL images
-        captions = [sample[1] for sample in samples]  # List of strings (captions)
-        return images, captions
     
     # optimizer
     optimizer = AdamW(transformer.parameters(), lr=params.learning_rate)
@@ -226,6 +219,3 @@ if __name__ == '__main__':
             global_step,
             accelerator.unwrap_model(pipe),
             params.validation_prompts)
-        
-        if params.output_repo != None:
-            transformer.push_to_hub(params.output_repo)

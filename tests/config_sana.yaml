@@ -26,8 +26,5 @@ validation_prompts:
 # model parameters
 pretrained_pipe_path: Efficient-Large-Model/Sana_600M_512px_diffusers
 #pretrained_model_path: Efficient-Large-Model/Sana_600M_512px_diffusers
-output_repo: meofwjoifejwoijoieffew
-hf_token: ojoijefwoiefwjoife
-
 
 
