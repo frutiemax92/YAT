@@ -5,6 +5,7 @@ import webdataset as wds
 from torch.utils.data import DataLoader
 from common.bucket_sampler import BucketDataset
 from torch.utils.tensorboard import SummaryWriter
+from webdataset.utils import pytorch_worker_info
 import torch
 import tqdm
 
@@ -25,6 +26,7 @@ class Trainer:
         self.accelerator = Accelerator(gradient_accumulation_steps=params.gradient_accumulation_steps)
 
         def split_only_on_main(src, group=None):
+            """Split the input sequence by PyTorch distributed rank."""
             yield from src
 
         datasets = [
@@ -50,6 +52,7 @@ class Trainer:
                             extract_latents_handler=self.extract_latents,
                             extract_embeddings_handler=self.extract_embeddings)
         self.dataloader = DataLoader(bucket_dataset, batch_size=None)
+        self.dataloader = self.accelerator.prepare_data_loader(self.dataloader)
 
         if self.accelerator.is_main_process:
             self.logger = SummaryWriter()
