@@ -6,13 +6,26 @@ This is Yet Another Trainer for diffusion models, currently supports those model
 1. SANA
 2. Pixart-Sigma
 
+It supports loading TAR folders in the WebDataset format (https://github.com/webdataset/webdataset) either from a secure Cloudflare R2 Bucket, public urls or from local folders. For public urls and local TAR folder, use the `urls` parameter. For the secure urls, see the Cloudflare R2 parameters in the next section.
+
+The trainer allows for multi-gpu training with `Accelerate` and dynamic aspect ratio bucketing; you don't need to train with square images only!
+
+For generating WebDatasets, it is highly suggested to use Img2Dataset (https://github.com/rom1504/img2dataset) for downloading the images and generating at the same time the TAR folders.
+
+This is currently tested under Ubuntu 24.04.1 LTS.
+
 ## How to train
 
-First, install the required packages.
+First, create a Python virtual environnement.
+
+    python3 -m venv .venv
+    source .venv/bin/activate
+
+Then, install the required packages.
 
     pip install --upgrade -r requirements.txt
 
-Then configure your accelerate configuration.
+After that, configure your accelerate configuration.
 
     accelerate config
 
