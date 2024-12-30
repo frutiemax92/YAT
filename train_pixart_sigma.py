@@ -23,6 +23,7 @@ class PixartSigmaTrainer(Trainer):
         if params.pretrained_model_path != None:
             transformer = PixArtSigmaPipeline.from_pretrained(params.pretrained_model_path)
             self.pipe.transformer = transformer
+        self.pipe.transformer.gradient_checkpointing = True
         
         self.scheduler = DDPMScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
         self.pipe.vae.train(False)
