@@ -3,7 +3,7 @@ from common.cloudflare import get_secured_urls
 from accelerate import Accelerator
 import webdataset as wds
 from torch.utils.data import DataLoader
-from bucket_sampler import BucketDataset
+from common.bucket_sampler import BucketDataset
 from torch.utils.tensorboard import SummaryWriter
 import torch
 import tqdm
