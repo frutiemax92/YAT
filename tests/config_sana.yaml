@@ -1,0 +1,33 @@
+# cloudflare settings
+r2_endpoint: oknjaoinoufew
+r2_access_key: oijoifejnowfeifew
+r2_secret_key: ojwefoifjoifewjefw
+r2_bucket_name: ofiwejfweoijfweqoinfew
+r2_tar_files: 
+  - mwefokfweokfawjeoiwfean
+  - rgejiweorgjgroirewjg
+  - jiofwejfeoifewq
+  - jewfoikjoieqjwhefwq
+# urls = oifwejoiewjoifewjfew
+
+# training parameters
+batch_size: 4
+learning_rate: 1.0e-5
+steps: 500000
+num_steps_per_validation: 100
+bfloat16: true
+gradient_accumulation_steps: 4
+validation_prompts:
+  - oijefwoijoijfeoifew
+  - pasdfkpofdskfpodas
+  - ppokpofewjpefjp
+  - momnvoiwnoifewa
+
+# model parameters
+pretrained_pipe_path: Efficient-Large-Model/Sana_600M_512px_diffusers
+#pretrained_model_path: Efficient-Large-Model/Sana_600M_512px_diffusers
+output_repo: meofwjoifejwoijoieffew
+hf_token: ojoijefwoiefwjoife
+
+
+

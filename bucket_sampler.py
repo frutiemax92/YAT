@@ -19,8 +19,10 @@ class BucketDataset(IterableDataset):
                  batch_size,
                  aspect_ratios,
                  accelerator : Accelerator,
-                 pipe : SanaPAGPipeline,
-                 discard_low_res=False):
+                 pipe,
+                 extract_latents_handler,
+                 extract_embeddings_handler,
+                 discard_low_res=True):
         super().__init__()
         self.dataset = dataset
         self.total_batch_size = batch_size * accelerator.num_processes
@@ -29,19 +31,14 @@ class BucketDataset(IterableDataset):
         self.discard_low_res = discard_low_res
         self.accelerator = accelerator
         self.pipe = pipe
+        self.extract_embeddings_handler = extract_embeddings_handler
+        self.extract_latents_handler = extract_latents_handler
     
     def extract_embeddings(self, captions : list[str]):
-        prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
-            self.pipe.encode_prompt(captions, do_classifier_free_guidance=False)
-        return prompt_embeds, prompt_attention_mask
+        return self.extract_embeddings_handler(self.pipe, captions)
 
     def extract_latents(self, images : torch.Tensor):
-        image_processor = self.pipe.image_processor
-        images = image_processor.preprocess(images)
-        flush()
-
-        output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
-        return output * self.pipe.vae.config.scaling_factor
+        return self.extract_latents_handler(self.pipe, images)
 
     def find_closest_ratio(self, img):
         width = img.shape[-1]
