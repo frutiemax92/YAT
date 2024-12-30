@@ -47,4 +47,6 @@ Here is the current list of parameters in the config file.
 - `urls` : contains the public urls that point to the TAR files in the form of WebDataset
 - `pretrained_model_path` : a path to the model that will get trained that is part of the pipeline. This is used when you want to start from a finetuned model and use the default pipeline.
 
+## About this repository
 
+This is a personal project for experimenting with training diffusion models as I like to know what is going on under the hood and apply some modifications to my personal preferences. I do not garantee the best results out of this project, use it at your own risk!
