@@ -73,6 +73,9 @@ class Trainer:
     def optimize(self, batch, model):
         raise NotImplemented
 
+    def finalize(self):
+        pass
+
     def run(self):
         params = self.params
         self.initialize()
@@ -95,6 +98,7 @@ class Trainer:
                 
                 if self.logger != None:
                     self.logger.add_scalar('train/loss', loss.detach().item(), self.global_step)
+                    progress_bar.update(1)
                 
                 self.global_step = self.global_step + 1
-                progress_bar.update(1)
+                self.finalize()

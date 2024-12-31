@@ -50,7 +50,10 @@ class TrainingParameters:
         self.validation_prompts = yaml_root['validation_prompts']
         
         if 'bfloat16' in yaml_root.keys():
-            self.bfloat16 = bool(yaml_root['bfloat16'])
+            if yaml_root['bfloat16'] == 'true':
+                self.bfloat16 = True
+            else:
+                self.bfloat16 = False
         else:
             self.bfloat16 = False
         
@@ -60,7 +63,10 @@ class TrainingParameters:
             self.gradient_accumulation_steps = 1
         
         if 'use_preservation' in yaml_root.keys():
-            self.use_preservation = bool(yaml_root['use_preservation'])
+            if yaml_root['use_preservation'] == 'true':
+                self.use_preservation = True
+            else:
+                self.use_preservation = False
             self.preservation_ratio = float(yaml_root['preservation_ratio'])
 
 if __name__ == '__main__':
