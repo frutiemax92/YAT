@@ -20,6 +20,9 @@ class SD35Trainer(Trainer):
         if params.pretrained_model_path != None:
             transformer = SD3Transformer2DModel.from_pretrained(params.pretrained_model_path)
             self.pipe.transformer = transformer
+
+        # required for lower vram consumption
+        self.pipe.transformer.gradient_checkpointing = True
         
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
         self.pipe.vae.train(False)
