@@ -8,3 +8,4 @@ ftfy
 webdataset
 tensorboard
 boto3
+bitsandbytes
