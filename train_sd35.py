@@ -79,6 +79,8 @@ class SD35Trainer(Trainer):
         return prompt_embeds, pooled_prompt_embeds
     
     def validate(self):
+        transformer = self.pipe.transformer
+        transformer = transformer.to(self.accelerator.device)
         params = self.params
         pil_to_tensor = PILToTensor()
         idx = 0
@@ -97,6 +99,7 @@ class SD35Trainer(Trainer):
         
         # save the transformer
         self.pipe.transformer.save_pretrained(f'{self.global_step}')
+        transformer = transformer.cpu()
     
     def optimize(self, model, batch):
         if self.accelerator.is_main_process:
