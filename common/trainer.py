@@ -62,7 +62,7 @@ class Trainer:
     def validate(self):
         raise NotImplemented
 
-    def optimize(self, batch):
+    def optimize(self, batch, model):
         raise NotImplemented
 
     def run(self):
@@ -76,6 +76,6 @@ class Trainer:
                     if self.accelerator.is_main_process:
                         with torch.no_grad():
                             self.validate()
-                self.optimize(batch)
+                self.optimize(self.model, batch)
                 self.global_step = self.global_step + 1
                 progress_bar.update(1)

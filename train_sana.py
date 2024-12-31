@@ -39,6 +39,7 @@ class SanaTrainer(Trainer):
         self.optimizer = AdamW(self.pipe.transformer.parameters(), lr=params.learning_rate)
         if params.bfloat16:
             self.pipe = self.pipe.to(torch.bfloat16)
+        self.model = self.pipe.transformer
     
     def initialize(self):
         super().initialize()
@@ -78,7 +79,7 @@ class SanaTrainer(Trainer):
         # save the transformer
         self.pipe.transformer.save_pretrained(f'{self.global_step}')
     
-    def optimize(self, batch):
+    def optimize(self, model, batch):
         params = self.params
         batch_size = params.batch_size
         latents, embeddings, attention_mask = batch
@@ -91,7 +92,7 @@ class SanaTrainer(Trainer):
         timesteps = self.scheduler.timesteps[indices].to(latents.device)
         noisy_model_input = self.scheduler.scale_noise(latents, timesteps, noise)
 
-        transformer = self.pipe.transformer
+        transformer = model
         with self.accelerator.accumulate(transformer):
             noise_pred = transformer(noisy_model_input.to(dtype=transformer.dtype),
                                     encoder_hidden_states=embeddings.to(dtype=transformer.dtype),
