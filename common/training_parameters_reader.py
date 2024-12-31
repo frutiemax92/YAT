@@ -21,6 +21,8 @@ class TrainingParameters:
         self.bfloat16 = None
         self.gradient_accumulation_steps = None
         self.output_repo = None
+        self.use_preservation = None
+        self.preservation_ratio = None
     
     def read_yaml(self, file):
         with open(file) as f:
@@ -56,6 +58,10 @@ class TrainingParameters:
             self.gradient_accumulation_steps = yaml_root['gradient_accumulation_steps']
         else:
             self.gradient_accumulation_steps = 1
+        
+        if 'use_preservation' in yaml_root.keys():
+            self.use_preservation = bool(yaml_root['use_preservation'])
+            self.preservation_ratio = float(yaml_root['preservation_ratio'])
 
 if __name__ == '__main__':
     params = TrainingParameters()

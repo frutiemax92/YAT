@@ -93,19 +93,13 @@ class SanaTrainer(Trainer):
         noisy_model_input = self.scheduler.scale_noise(latents, timesteps, noise)
 
         transformer = model
-        with self.accelerator.accumulate(transformer):
-            noise_pred = transformer(noisy_model_input.to(dtype=transformer.dtype),
-                                    encoder_hidden_states=embeddings.to(dtype=transformer.dtype),
-                                    timestep=timesteps,
-                                    encoder_attention_mask=attention_mask.to(dtype=transformer.dtype)).sample
-            target = noise - latents
-            loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
-            self.accelerator.backward(loss)
-            self.optimizer.step()
-            self.optimizer.zero_grad()
-
-        if self.logger != None:
-            self.logger.add_scalar('train/loss', loss.detach().item(), self.global_step)
+        noise_pred = transformer(noisy_model_input.to(dtype=transformer.dtype),
+                                encoder_hidden_states=embeddings.to(dtype=transformer.dtype),
+                                timestep=timesteps,
+                                encoder_attention_mask=attention_mask.to(dtype=transformer.dtype)).sample
+        target = noise - latents
+        loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
+        return loss
         
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

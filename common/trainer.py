@@ -8,6 +8,7 @@ from torch.utils.tensorboard import SummaryWriter
 from webdataset.utils import pytorch_worker_info
 import torch
 import tqdm
+from copy import deepcopy
 
 class Trainer:
     def __init__(self, params : TrainingParameters):
@@ -35,6 +36,7 @@ class Trainer:
             .to_tuple(["jpg", 'jpeg'], "txt", handler=wds.warn_and_continue)  # Return image and text
         for url in urls]
         self.mix = wds.RandomMix(datasets)
+        self.preservation_model = None
 
     def extract_latents(self, images):
         raise NotImplemented
@@ -58,6 +60,12 @@ class Trainer:
             self.logger = SummaryWriter()
         else:
             self.logger = None
+        
+        if params.use_preservation:
+            self.preservation_model = deepcopy(self.model)
+            self.preservation_model.train(False)
+            self.preservation_model = self.accelerator.prepare(self.preservation_model)
+            
 
     def validate(self):
         raise NotImplemented
@@ -76,6 +84,17 @@ class Trainer:
                     if self.accelerator.is_main_process:
                         with torch.no_grad():
                             self.validate()
-                self.optimize(self.model, batch)
+
+                with self.accelerator.accumulate(self.model):
+                    loss = self.optimize(self.model, batch)
+                    if self.preservation_model != None:
+                        loss = loss + self.params.preservation_ratio * self.optimize(self.preservation_model, batch)
+                    self.accelerator.backward(loss)
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+                
+                if self.logger != None:
+                    self.logger.add_scalar('train/loss', loss.detach().item(), self.global_step)
+                
                 self.global_step = self.global_step + 1
                 progress_bar.update(1)
