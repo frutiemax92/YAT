@@ -75,7 +75,7 @@ class SD35Trainer(Trainer):
 
     def extract_embeddings(self, captions):
         prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
-        self.pipe.encode_prompt(prompt=captions, prompt_2=captions, prompt_3=captions, do_classifier_free_guidance=False)
+        self.pipe.encode_prompt(prompt=captions, prompt_2=captions, prompt_3=captions, do_classifier_free_guidance=False, device=self.accelerator.device)
         return prompt_embeds, pooled_prompt_embeds
     
     def validate(self):
