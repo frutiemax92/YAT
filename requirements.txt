@@ -9,3 +9,4 @@ webdataset
 tensorboard
 boto3
 bitsandbytes
+lycoris-lora

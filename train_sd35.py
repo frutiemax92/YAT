@@ -45,8 +45,6 @@ class SD35Trainer(Trainer):
             self.pipe.transformer = self.pipe.transformer.to(torch.bfloat16)
 
         self.aspect_ratios = ASPECT_RATIO_1024_BIN
-
-        self.optimizer = bnb.optim.Adam8bit(self.pipe.transformer.parameters(), lr=params.learning_rate)
         if params.bfloat16:
             self.pipe = self.pipe.to(torch.bfloat16)
         self.model = self.pipe.transformer

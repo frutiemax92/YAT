@@ -23,6 +23,17 @@ class TrainingParameters:
         self.output_repo = None
         self.use_preservation = None
         self.preservation_ratio = None
+
+        # lora
+        self.lora_target_modules = None
+        self.lora_rank = None
+        self.lora_alpha = None
+        self.lora_dropout = None
+        self.lora_bias = None
+        self.lora_use_rslora = None
+
+        # low vram
+        self.low_vram = None
     
     def read_yaml(self, file):
         with open(file) as f:
@@ -49,13 +60,7 @@ class TrainingParameters:
         self.num_steps_per_validation = int(yaml_root['num_steps_per_validation'])
         self.validation_prompts = yaml_root['validation_prompts']
         
-        if 'bfloat16' in yaml_root.keys():
-            if yaml_root['bfloat16'] == 'true':
-                self.bfloat16 = True
-            else:
-                self.bfloat16 = False
-        else:
-            self.bfloat16 = False
+        self.bfloat16 =  'bfloat16' in yaml_root.keys()
         
         if 'gradient_accumulation_steps' in yaml_root.keys():
             self.gradient_accumulation_steps = yaml_root['gradient_accumulation_steps']
@@ -63,11 +68,23 @@ class TrainingParameters:
             self.gradient_accumulation_steps = 1
         
         if 'use_preservation' in yaml_root.keys():
-            if yaml_root['use_preservation'] == 'true':
-                self.use_preservation = True
-            else:
-                self.use_preservation = False
+            self.use_preservation = True
             self.preservation_ratio = float(yaml_root['preservation_ratio'])
+        else:
+            self.use_preservation = False
+        
+        # lora training
+        if 'lora_rank' in yaml_root.keys():
+            self.lora_target_modules = yaml_root['lora_target_modules']
+            self.lora_rank = int(yaml_root['lora_rank'])
+            self.lora_alpha = int(yaml_root['lora_alpha'])
+            self.lora_dropout = float(yaml_root['lora_dropout'])
+            self.lora_bias = 'lora_bias' in yaml_root.keys()
+
+            self.lora_use_rslora = 'lora_use_rslora' in yaml_root.keys()
+            self.lora_use_dora = 'lora_use_dora' in yaml_root.keys()
+        
+        self.low_vram = 'low_vram' in yaml_root.keys()
 
 if __name__ == '__main__':
     params = TrainingParameters()

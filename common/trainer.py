@@ -6,9 +6,12 @@ from torch.utils.data import DataLoader
 from common.bucket_sampler import BucketDataset
 from torch.utils.tensorboard import SummaryWriter
 from webdataset.utils import pytorch_worker_info
+from torch.optim.adamw import AdamW
 import torch
 import tqdm
 from copy import deepcopy
+from lycoris import create_lycoris, LycorisNetwork
+import bitsandbytes as bnb
 
 class Trainer:
     def __init__(self, params : TrainingParameters):
@@ -46,14 +49,14 @@ class Trainer:
     
     def initialize(self):
         params = self.params
-        bucket_dataset = BucketDataset(self.mix,
+        self.bucket_dataset = BucketDataset(self.mix,
                             params.batch_size,
                             self.aspect_ratios,
                             self.accelerator,
                             self.pipe,
                             extract_latents_handler=self.extract_latents,
                             extract_embeddings_handler=self.extract_embeddings)
-        self.dataloader = DataLoader(bucket_dataset, batch_size=None)
+        self.dataloader = DataLoader(self.bucket_dataset, batch_size=None)
         self.dataloader = self.accelerator.prepare_data_loader(self.dataloader)
 
         if self.accelerator.is_main_process:
@@ -65,7 +68,37 @@ class Trainer:
             self.preservation_model = deepcopy(self.model)
             self.preservation_model.train(False)
             self.preservation_model = self.accelerator.prepare(self.preservation_model)
-            
+        
+        # check for lora training
+        if params.lora_rank != None:
+            dtype = self.model.dtype
+            device = self.model.device
+            LycorisNetwork.apply_preset(
+                {'target_name': params.lora_target_modules}
+            )
+
+            lycoris_net = create_lycoris(
+                self.model,
+                1.0,
+                linear_dim=self.params.lora_rank,
+                linear_alpha=self.params.lora_alpha,
+                algo='locon'
+            )
+            for lora in lycoris_net.loras:
+                lora = lora.to(dtype=dtype, device=self.accelerator.device)
+            lycoris_net.apply_to()
+
+            for param in self.model.parameters():
+                param.requires_grad = False
+
+            params_to_optimizer = lycoris_net.parameters()
+        else:
+            params_to_optimizer = self.model.parameters()
+
+        if params.low_vram:
+            self.optimizer = bnb.optim.Adam8bit(params_to_optimizer, lr=params.learning_rate)
+        else:
+            self.optimizer = AdamW(params_to_optimizer, lr=params.learning_rate)
 
     def validate(self):
         raise NotImplemented
