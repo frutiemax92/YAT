@@ -5,12 +5,15 @@
 This is Yet Another Trainer for diffusion models, currently supports those models:
 1. SANA
 2. Pixart-Sigma
+3. Stable Diffusion 3.5
 
 It supports loading TAR folders in the WebDataset format (https://github.com/webdataset/webdataset) either from a secure Cloudflare R2 Bucket, public urls or from local folders. For public urls and local TAR folder, use the `urls` parameter. For the secure urls, see the Cloudflare R2 parameters in the next section.
 
 The trainer allows for multi-gpu training with `Accelerate` and dynamic aspect ratio bucketing; you don't need to train with square images only!
 
 For generating WebDatasets, it is highly suggested to use Img2Dataset (https://github.com/rom1504/img2dataset) for downloading the images and generating at the same time the TAR folders.
+
+The code also allows for Lycoris Finetuning (not Dreambooth) as it can give faster convergence due to a lower parameter count/different reparametrization. Tested to work correctly with Lora, Locon and Loha, the other algorithms give an error as of writing.
 
 This is currently tested under Ubuntu 24.04.1 LTS.
 
@@ -59,6 +62,23 @@ Here is the current list of parameters in the config file.
 - `pretrained_pipe_path` : a path to the diffusers pipeline, either hosted locally or on HuggingFace
 - `urls` : contains the public urls that point to the TAR files in the form of WebDataset
 - `pretrained_model_path` : a path to the model that will get trained that is part of the pipeline. This is used when you want to start from a finetuned model and use the default pipeline.
+- `lora_rank` : the rank of the lora (see https://arxiv.org/abs/2106.09685)
+- `lora_alpha` : the alpha parameter for lora training. A correct value is `lora_alpha=lora_rank`.
+- `lora_dropout` : dropout probability for lora training
+- `lora_algo` : the algorithm to use for lora training
+  - `lora`
+  - `locon`
+  - `loha`
+  - `lokr`
+  - `dylora`
+  - `glora`
+  - `full`
+  - `diag-oft`
+  - `boft`
+- `lora_target_modules` : the names of the targeted modules for the reparametrization. For SANA, a good value is `ff`.
+- `low_vram` : use this when low on VRAM. For SANA, it is possible with this option to train with a `batch size=4`, `lora_rank=8`, `lora_algo=locon` under 12 GB VRAM (tested on dual RTX4070s)
+- `use_preservation` : the original model under training is cloned in a frozen copy. The training loss is then `loss_tot=loss_noise + preservation_ratio*loss_reconstruction`. Use this if you want to preserve some of the original model behaviour.
+- `preservation_ratio` : the ratio as explained just above
 
 ## About this repository
 
