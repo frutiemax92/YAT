@@ -69,6 +69,7 @@ class Trainer:
             self.preservation_model.train(False)
             self.preservation_model = self.accelerator.prepare(self.preservation_model)
         
+        self.lycoris_net = None
         # check for lora training
         if params.lora_rank != None:
             dtype = self.model.dtype
@@ -77,21 +78,21 @@ class Trainer:
                 {'target_name': params.lora_target_modules}
             )
 
-            lycoris_net = create_lycoris(
+            self.lycoris_net = create_lycoris(
                 self.model,
                 1.0,
                 linear_dim=self.params.lora_rank,
                 linear_alpha=self.params.lora_alpha,
                 algo=self.params.lora_algo
             )
-            for lora in lycoris_net.loras:
+            for lora in self.lycoris_net.loras:
                 lora = lora.to(dtype=dtype, device=self.accelerator.device)
-            lycoris_net.apply_to()
+            self.lycoris_net.apply_to()
 
             for param in self.model.parameters():
                 param.requires_grad = False
 
-            params_to_optimizer = lycoris_net.parameters()
+            params_to_optimizer = self.lycoris_net.parameters()
         else:
             params_to_optimizer = self.model.parameters()
 

@@ -91,7 +91,14 @@ class SanaTrainer(Trainer):
             text_encoder = self.pipe.text_encoder
             text_encoder = text_encoder.cpu()
         self.pipe.vae = None
-        self.pipe.to(device=self.accelerator.device)
+        dtype = self.pipe.dtype
+
+        # convert to float16 as inference with bfloat16 is unstable
+        self.pipe.to(device=self.accelerator.device, dtype=torch.float16)
+
+        if self.lycoris_net != None:
+            for lora in self.lycoris_net.loras:
+                lora = lora.to(dtype=torch.float16)
 
         pil_to_tensor = PILToTensor()
         idx = 0
@@ -124,6 +131,11 @@ class SanaTrainer(Trainer):
         
         # save the transformer
         self.pipe.transformer.save_pretrained(f'{self.global_step}')
+        self.pipe = self.pipe.to(dtype)
+
+        if self.lycoris_net != None:
+            for lora in self.lycoris_net.loras:
+                lora = lora.to(dtype=dtype)
 
 
     
