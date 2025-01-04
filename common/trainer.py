@@ -82,7 +82,7 @@ class Trainer:
                 1.0,
                 linear_dim=self.params.lora_rank,
                 linear_alpha=self.params.lora_alpha,
-                algo='locon'
+                algo=self.params.lora_algo
             )
             for lora in lycoris_net.loras:
                 lora = lora.to(dtype=dtype, device=self.accelerator.device)
