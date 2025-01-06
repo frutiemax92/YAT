@@ -110,6 +110,18 @@ class Trainer:
     def finalize(self):
         pass
 
+    def save_model(self):
+        if self.lycoris_net != None:
+            lycoris_filename = f'{self.global_step}.safetensors'
+            self.lycoris_net.save_weights(lycoris_filename, dtype=torch.float16, metadata=None)
+        else:
+            self.model.save_pretrained(f'{self.global_step}')
+
+        self.pipe = self.pipe.to(torch.bfloat16)
+        if self.lycoris_net != None:
+            for lora in self.lycoris_net.loras:
+                lora = lora.to(dtype=torch.bfloat16)
+
     def run(self):
         params = self.params
         self.initialize()
@@ -121,6 +133,7 @@ class Trainer:
                     if self.accelerator.is_main_process:
                         with torch.no_grad():
                             self.validate()
+                            self.save_model()
 
                 with self.accelerator.accumulate(self.model):
                     loss = self.optimize(self.model, batch)

@@ -12,11 +12,15 @@ from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
 from common.trainer import Trainer
 import gc
+from copy import deepcopy
+from lycoris import create_lycoris_from_weights
 
 class SanaTrainer(Trainer):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
-        self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path)
+        self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path,
+                                                   torch_dtype=torch.float16,
+                                                    variant='fp16')
         if params.pretrained_model_path != None:
             transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path)
             self.pipe.transformer = transformer
@@ -91,7 +95,6 @@ class SanaTrainer(Trainer):
             text_encoder = self.pipe.text_encoder
             text_encoder = text_encoder.cpu()
         self.pipe.vae = None
-        dtype = self.pipe.dtype
 
         # convert to float16 as inference with bfloat16 is unstable
         self.pipe.to(device=self.accelerator.device, dtype=torch.float16)
@@ -128,16 +131,6 @@ class SanaTrainer(Trainer):
             image = self.pipe.image_processor.postprocess(image)
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image[0]), self.global_step)
             idx = idx + 1
-        
-        # save the transformer
-        self.pipe.transformer.save_pretrained(f'{self.global_step}')
-        self.pipe = self.pipe.to(dtype)
-
-        if self.lycoris_net != None:
-            for lora in self.lycoris_net.loras:
-                lora = lora.to(dtype=dtype)
-
-
     
     def optimize(self, model, batch):
         if self.params.low_vram and self.accelerator.is_main_process:
