@@ -10,9 +10,9 @@ from torch.optim.adamw import AdamW
 import torch
 import tqdm
 from copy import deepcopy
-from lycoris import create_lycoris, LycorisNetwork
 import bitsandbytes as bnb
 from peft import LoraConfig, get_peft_model, PeftModel
+from peft import LoHaConfig, LoKrConfig
 
 class Trainer:
     def __init__(self, params : TrainingParameters):
@@ -75,10 +75,20 @@ class Trainer:
             dtype = self.model.dtype
             device = self.model.device
             if self.params.lora_pretrained == None:
-                config = LoraConfig(r=params.lora_rank,
-                                    target_modules=params.lora_target_modules,
-                                    lora_alpha=params.lora_alpha)
-                self.model = get_peft_model(self.model, config)
+                if params.lora_algo == 'lora':
+                    config = LoraConfig(r=params.lora_rank,
+                                        target_modules=params.lora_target_modules,
+                                        lora_alpha=params.lora_alpha)
+                elif params.lora_algo == 'loha':
+                    config = LoHaConfig(r=params.lora_rank,
+                                        target_modules=params.lora_target_modules,
+                                        alpha=params.lora_alpha)
+                elif params.lora_algo == 'lokr':
+                    config = LoKrConfig(r=params.lora_rank,
+                                        target_modules=params.lora_target_modules,
+                                        alpha=params.lora_alpha,
+                                        use_effective_conv2d=True)
+                self.model = get_peft_model(self.model, config).to(dtype=dtype)
                 
             else:
                 self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True)

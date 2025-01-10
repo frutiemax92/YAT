@@ -95,7 +95,8 @@ class SanaTrainer(Trainer):
             vae = vae.cpu()
             text_encoder = self.pipe.text_encoder
             text_encoder = text_encoder.cpu()
-        self.pipe.vae = None
+            self.pipe.vae = None
+            torch.cuda.empty_cache()
 
         # convert to float16 as inference with bfloat16 is unstable
         self.pipe.to(device=self.accelerator.device, dtype=torch.float16)
@@ -105,8 +106,22 @@ class SanaTrainer(Trainer):
         generator=torch.Generator(device="cuda").manual_seed(42)
         latents = []
         for prompt in tqdm.tqdm(params.validation_prompts, desc='Generating validation latents'):
+            if params.low_vram:
+                text_encoder = text_encoder.to(device=self.accelerator.device)
+                self.pipe.text_encoder = text_encoder
+                prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
+                    self.pipe.encode_prompt(prompt)
+                text_encoder = text_encoder.cpu()
+                self.pipe.text_encoder = None
+                self.pipe = self.pipe.to(self.accelerator.device)
+                torch.cuda.empty_cache()
+
             latent = self.pipe(
-                prompt=prompt,
+                negative_prompt=None,
+                prompt_embeds=prompt_embeds,
+                prompt_attention_mask=prompt_attention_mask,
+                negative_prompt_embeds=negative_prompt_embeds,
+                negative_prompt_attention_mask=negative_prompt_attention_mask,
                 guidance_scale=5.0,
                 num_inference_steps=20,
                 generator=generator,
@@ -115,6 +130,7 @@ class SanaTrainer(Trainer):
             latents.append(latent)
 
         self.pipe.vae = vae
+        self.pipe.text_encoder = text_encoder
         if self.params.low_vram:
             transformer = transformer.cpu()
             vae = vae.to(self.accelerator.device)

@@ -81,7 +81,7 @@ class TrainingParameters:
             self.lora_target_modules = yaml_root['lora_target_modules']
             self.lora_rank = int(yaml_root['lora_rank'])
             self.lora_alpha = int(yaml_root['lora_alpha'])
-            self.lora_dropout = float(yaml_root['lora_dropout'])
+            #self.lora_dropout = float(yaml_root['lora_dropout'])
             self.lora_bias = 'lora_bias' in yaml_root.keys()
             self.lora_algo = yaml_root['lora_algo'] # locon, lora, loha, lokr, dylora, glora, full, diag-oft, boft
 
