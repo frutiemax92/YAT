@@ -13,8 +13,7 @@ The trainer allows for multi-gpu training with `Accelerate` and dynamic aspect r
 
 For generating WebDatasets, it is highly suggested to use Img2Dataset (https://github.com/rom1504/img2dataset) for downloading the images and generating at the same time the TAR folders.
 
-The code also allows for Lycoris Finetuning (not Dreambooth) as it can give faster convergence due to a lower parameter count/different reparametrization. Tested to work correctly with Lora, Locon and Loha, the other algorithms give an error as of writing.
-
+The code also allows for LoRA Finetuning (not Dreambooth) as it can give faster convergence due to a lower parameter count/different reparametrization. Other LoRA algorithms are not implemented yet.
 This is currently tested under Ubuntu 24.04.1 LTS.
 
 ## How to train
