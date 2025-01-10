@@ -13,7 +13,7 @@ The trainer allows for multi-gpu training with `Accelerate` and dynamic aspect r
 
 For generating WebDatasets, it is highly suggested to use Img2Dataset (https://github.com/rom1504/img2dataset) for downloading the images and generating at the same time the TAR folders.
 
-The code also allows for LoRA Finetuning (not Dreambooth) as it can give faster convergence due to a lower parameter count/different reparametrization. Lokr and Loha algorithms are also supported. There is currently a bug in PEFT with the 'conv_depth' module, so add that to the target modules.
+The code also allows for LoRA Finetuning (not Dreambooth) as it can give faster convergence due to a lower parameter count/different reparametrization. Lokr and Loha algorithms are also supported. There is currently a bug in PEFT with the 'conv_depth' module, so do not add that to the target modules.
 
 This is currently tested under Ubuntu 24.04.1 LTS.
 
