@@ -71,7 +71,7 @@ Here is the current list of parameters in the config file.
   - `lokr`
 - `lora_target_modules` : the names of the targeted modules for the reparametrization. For SANA, a good value is `conv_inverted conv_point to_q to_k to_v to_out.0 linear_1 linear_2 proj`.
 - `lora_pretrained` : if you want to resume training from a lora model, specify it there
-- `low_vram` : use this when low on VRAM. For SANA, it is possible with this option to train with a `batch size=4`, `lora_rank=8`, `lora_algo=locon` under 12 GB VRAM (tested on dual RTX4070s)
+- `low_vram` : use this when low on VRAM. For SANA, it is possible with this option to train with a `batch size=4`, `lora_rank=8`, `lora_algo=lora` under 12 GB VRAM (tested on dual RTX4070s)
 - `use_preservation` : the original model under training is cloned in a frozen copy. The training loss is then `loss_tot=loss_noise + preservation_ratio*loss_reconstruction`. Use this if you want to preserve some of the original model behaviour.
 - `preservation_ratio` : the ratio as explained just above
 
