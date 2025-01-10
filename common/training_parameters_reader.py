@@ -31,6 +31,7 @@ class TrainingParameters:
         self.lora_dropout = None
         self.lora_bias = None
         self.lora_use_rslora = None
+        self.lora_pretrained = None
 
         # low vram
         self.low_vram = None
@@ -75,6 +76,8 @@ class TrainingParameters:
         
         # lora training
         if 'lora_rank' in yaml_root.keys():
+            if 'lora_pretrained' in yaml_root.keys():
+                self.lora_pretrained = yaml_root['lora_pretrained']
             self.lora_target_modules = yaml_root['lora_target_modules']
             self.lora_rank = int(yaml_root['lora_rank'])
             self.lora_alpha = int(yaml_root['lora_alpha'])

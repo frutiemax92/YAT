@@ -12,6 +12,7 @@ import tqdm
 from copy import deepcopy
 from lycoris import create_lycoris, LycorisNetwork
 import bitsandbytes as bnb
+from peft import LoraConfig, get_peft_model, PeftModel
 
 class Trainer:
     def __init__(self, params : TrainingParameters):
@@ -68,33 +69,22 @@ class Trainer:
             self.preservation_model = deepcopy(self.model)
             self.preservation_model.train(False)
             self.preservation_model = self.accelerator.prepare(self.preservation_model)
-        
-        self.lycoris_net = None
+    
         # check for lora training
         if params.lora_rank != None:
             dtype = self.model.dtype
             device = self.model.device
-            LycorisNetwork.apply_preset(
-                {'target_name': params.lora_target_modules}
-            )
+            if self.params.lora_pretrained == None:
+                config = LoraConfig(r=params.lora_rank,
+                                    target_modules=params.lora_target_modules,
+                                    lora_alpha=params.lora_alpha)
+                self.model = get_peft_model(self.model, config)
+                
+            else:
+                self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True)
 
-            self.lycoris_net = create_lycoris(
-                self.model,
-                1.0,
-                linear_dim=self.params.lora_rank,
-                linear_alpha=self.params.lora_alpha,
-                algo=self.params.lora_algo
-            )
-            for lora in self.lycoris_net.loras:
-                lora = lora.to(dtype=dtype, device=self.accelerator.device)
-            self.lycoris_net.apply_to()
-
-            for param in self.model.parameters():
-                param.requires_grad = False
-
-            params_to_optimizer = self.lycoris_net.parameters()
-        else:
-            params_to_optimizer = self.model.parameters()
+        self.model.print_trainable_parameters()
+        params_to_optimizer = self.model.parameters()
 
         if params.low_vram:
             self.optimizer = bnb.optim.Adam8bit(params_to_optimizer, lr=params.learning_rate)
@@ -111,16 +101,8 @@ class Trainer:
         pass
 
     def save_model(self):
-        if self.lycoris_net != None:
-            lycoris_filename = f'{self.global_step}.safetensors'
-            self.lycoris_net.save_weights(lycoris_filename, dtype=torch.float16, metadata=None)
-        else:
-            self.model.save_pretrained(f'{self.global_step}')
-
+        self.model.save_pretrained(f'{self.global_step}')
         self.pipe = self.pipe.to(torch.bfloat16)
-        if self.lycoris_net != None:
-            for lora in self.lycoris_net.loras:
-                lora = lora.to(dtype=torch.bfloat16)
 
     def run(self):
         params = self.params

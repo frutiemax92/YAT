@@ -22,7 +22,7 @@ class SanaTrainer(Trainer):
                                                    torch_dtype=torch.float16,
                                                     variant='fp16')
         if params.pretrained_model_path != None:
-            transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path)
+            transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path) 
             self.pipe.transformer = transformer
         
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
@@ -48,6 +48,7 @@ class SanaTrainer(Trainer):
     def initialize(self):
         super().initialize()
         self.pipe = self.pipe.to(self.accelerator.device)
+        self.pipe.transformer = self.model
         text_encoder = self.pipe.text_encoder
         vae = self.pipe.vae
         transformer = self.pipe.transformer
@@ -98,10 +99,6 @@ class SanaTrainer(Trainer):
 
         # convert to float16 as inference with bfloat16 is unstable
         self.pipe.to(device=self.accelerator.device, dtype=torch.float16)
-
-        if self.lycoris_net != None:
-            for lora in self.lycoris_net.loras:
-                lora = lora.to(dtype=torch.float16)
 
         pil_to_tensor = PILToTensor()
         idx = 0
