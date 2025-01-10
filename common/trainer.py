@@ -77,14 +77,17 @@ class Trainer:
             if self.params.lora_pretrained == None:
                 if params.lora_algo == 'lora':
                     config = LoraConfig(r=params.lora_rank,
+                                        lora_dropout=params.lora_dropout,
                                         target_modules=params.lora_target_modules,
                                         lora_alpha=params.lora_alpha)
                 elif params.lora_algo == 'loha':
                     config = LoHaConfig(r=params.lora_rank,
+                                        module_dropout=params.lora_dropout,
                                         target_modules=params.lora_target_modules,
                                         alpha=params.lora_alpha)
                 elif params.lora_algo == 'lokr':
                     config = LoKrConfig(r=params.lora_rank,
+                                        module_dropout=params.lora_dropout,
                                         target_modules=params.lora_target_modules,
                                         alpha=params.lora_alpha,
                                         use_effective_conv2d=True)
