@@ -66,7 +66,7 @@ class SanaTrainer(Trainer):
         image_processor = self.pipe.image_processor
         images = image_processor.preprocess(images)
 
-        if self.params.low_vram == False:
+        if self.params.low_vram == False or self.params.batch_size >= 8:
             output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
         else:
             output = []
