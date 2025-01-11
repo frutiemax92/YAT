@@ -61,6 +61,11 @@ class TrainingParameters:
         self.num_steps_per_validation = int(yaml_root['num_steps_per_validation'])
         self.validation_prompts = yaml_root['validation_prompts']
         
+        if 'weight_decay' in yaml_root.keys():
+            self.weight_decay = yaml_root['weight_decay']
+        else:
+            self.weight_decay = 0.0
+        
         self.bfloat16 =  'bfloat16' in yaml_root.keys()
         
         if 'gradient_accumulation_steps' in yaml_root.keys():

@@ -100,9 +100,13 @@ class Trainer:
         params_to_optimizer = self.model.parameters()
 
         if params.low_vram:
-            self.optimizer = bnb.optim.Adam8bit(params_to_optimizer, lr=params.learning_rate)
+            self.optimizer = bnb.optim.Adam8bit(params_to_optimizer,
+                                                lr=params.learning_rate,
+                                                weight_decay=params.weight_decay)
         else:
-            self.optimizer = AdamW(params_to_optimizer, lr=params.learning_rate)
+            self.optimizer = AdamW(params_to_optimizer,
+                                   lr=params.learning_rate,
+                                   weight_decay=params.weight_decay)
 
     def validate(self):
         raise NotImplemented
