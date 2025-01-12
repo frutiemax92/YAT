@@ -55,7 +55,10 @@ class BucketDatasetWithCache(IterableDataset):
 
         # create the cache folder
         os.makedirs('cache', exist_ok=True)
-
+    
+    def __len__(self):
+        return self.cache_size
+    
     def __iter__(self):
         for idx in tqdm(range(self.cache_size), desc='Processing cache'):
             ratio, latent, embedding = torch.load(f'cache/{idx + self.cache_size * torch.cuda.current_device()}.npy')
@@ -87,10 +90,7 @@ class BucketDatasetWithCache(IterableDataset):
                                 dim.append(embed[i])
                             batch.append(torch.stack(dim).squeeze())
                         
-                        if idx == self.cache_size - 1 and current_batch == self.accelerator.num_processes - 1:
-                            return batch
-                        else:
-                            yield batch
+                        yield batch
                         latents.clear()
                         embeddings.clear()
                         current_batch = current_batch + 1
