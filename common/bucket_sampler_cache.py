@@ -70,6 +70,7 @@ class BucketDatasetWithCache(IterableDataset):
                 # transform the PIL image to a tensor
                 latents = []
                 embeddings = []
+                current_batch = 0
                 for elem in self.buckets[ratio]:
                     latent_tmp, embedding_tmp = elem
                     latents.append(latent_tmp)
@@ -85,11 +86,15 @@ class BucketDatasetWithCache(IterableDataset):
                             for embed in embeddings:
                                 dim.append(embed[i])
                             batch.append(torch.stack(dim).squeeze())
-                        yield batch
+                        
+                        if idx == self.cache_size - 1 and current_batch == self.accelerator.num_processes - 1:
+                            return batch
+                        else:
+                            yield batch
                         latents.clear()
                         embeddings.clear()
+                        current_batch = current_batch + 1
                 self.buckets.pop(ratio)
-        yield torch.tensor(0)
 
 if __name__ == '__main__':
     test = [1, 3, 4, 5]
