@@ -30,6 +30,10 @@ Then, install the required packages.
 
     pip install --upgrade -r requirements.txt
 
+The current diffusers library version has a bug with the SanaPipeline, you need to install it from its github repository or you won't get good validation images.
+
+    pip install --upgrade git+https://github.com/huggingface/diffusers.git
+
 After that, configure your accelerate configuration.
 
     accelerate config
