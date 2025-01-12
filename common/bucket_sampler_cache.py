@@ -27,22 +27,15 @@ class DataExtractor(IterableDataset):
         self.pipe = pipe
 
     def __iter__(self):
-        for idx in tqdm(range(self.cache_size), desc='Caching latents and embeddings'):
-            # get the next item and make sure to check for iterator exhaust
-            try:
-                img, caption = next(self.dataset_iterator)
-            except StopIteration:
-                self.dataset_iterator = iter(self.dataset)
-                img, caption = next(self.dataset_iterator)
+        while True:
+            for img, caption in self.dataset:
+                img = self.pipe.image_processor.pil_to_numpy(img)
+                img = torch.tensor(img).to(dtype=self.pipe.dtype)
+                img = torch.moveaxis(img, -1, 1)
 
-            img = self.pipe.image_processor.pil_to_numpy(img)
-            img = torch.tensor(img).to(dtype=self.pipe.dtype)
-            img = torch.moveaxis(img, -1, 1)
-
-            caption = list(caption.encode('utf-8'))
-            caption = torch.tensor(caption, dtype=torch.uint8)
-            idx = torch.tensor(idx)
-            yield img.contiguous(), caption.contiguous(), idx
+                caption = list(caption.encode('utf-8'))
+                caption = torch.tensor(caption, dtype=torch.uint8)
+                yield img.contiguous(), caption.contiguous()
 
 class BucketDatasetWithCache(IterableDataset):
     def __init__(self,
@@ -99,8 +92,13 @@ class BucketDatasetWithCache(IterableDataset):
         yield torch.tensor(0)
 
 if __name__ == '__main__':
-    test = 'hello world'
-    encoded = list(test.encode('utf-8'))
-    tensor = torch.tensor(encoded, dtype=torch.uint8)
-    decoded = bytes(tensor.tolist()).decode('utf-8')
-    print(decoded)
+    test = [1, 3, 4, 5]
+    num = 1000
+    my_iter = iter(test)
+
+    for j in tqdm(range(num)):
+        try:
+            b = next(my_iter)
+        except StopIteration as e:
+            b = iter(my_iter)
+        print(b)

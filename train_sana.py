@@ -160,9 +160,6 @@ class SanaTrainer(Trainer):
         params = self.params
         batch_size = params.batch_size
         latents, embeddings, attention_mask = batch
-        latents = latents.to(self.accelerator.device)
-        embeddings = embeddings.to(self.accelerator.device)
-        attention_mask = attention_mask.to(self.accelerator.device)
 
         loss_fn = torch.nn.MSELoss()
         noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=self.pipe.dtype)
@@ -173,10 +170,10 @@ class SanaTrainer(Trainer):
         noisy_model_input = self.scheduler.scale_noise(latents.to(self.accelerator.device), timesteps, noise)
 
         transformer = model
-        noise_pred = transformer(noisy_model_input.to(dtype=transformer.dtype),
-                                encoder_hidden_states=embeddings.to(dtype=transformer.dtype),
-                                timestep=timesteps,
-                                encoder_attention_mask=attention_mask.to(dtype=transformer.dtype)).sample
+        noise_pred = transformer(noisy_model_input.to(dtype=self.pipe.vae.dtype),
+                                encoder_hidden_states=embeddings.to(dtype=self.pipe.vae.dtype),
+                                timestep=timesteps.to(dtype=self.pipe.vae.dtype),
+                                encoder_attention_mask=attention_mask.to(dtype=self.pipe.vae.dtype)).sample
         target = noise - latents
         loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
         return loss

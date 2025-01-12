@@ -81,6 +81,7 @@ class Trainer:
                                                      self.aspect_ratios,
                                                      self.accelerator,
                                                      self.pipe)
+        self.data_extractor_iter = iter(self.data_extractor)
         
         def collate_fn(batch):
             return batch
@@ -123,8 +124,10 @@ class Trainer:
                 
             else:
                 self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True)
+                self.model.print_trainable_parameters()
 
-        self.model.print_trainable_parameters()
+        if self.params.bfloat16:
+            self.model = self.model.to(dtype=torch.bfloat16)
         params_to_optimizer = self.model.parameters()
 
         if params.low_vram:
@@ -156,13 +159,14 @@ class Trainer:
         progress_bar = tqdm.tqdm(total=params.steps, desc='Num Steps')
         while self.global_step < params.steps:
             # start with the caching
-            for img, caption, idx in self.dataloader_extractor:
+            for idx in tqdm.tqdm(range(self.params.cache_size), desc='Caching latents and embeddings'):
+                img, caption = next(self.data_extractor_iter)
+
                 # decode the caption into a string
                 caption = torch.squeeze(caption)
                 img = torch.squeeze(img)
 
                 caption = bytes(caption.tolist()).decode('utf-8')
-                idx = idx.item()
 
                 # find the aspect ratio
                 width = img.shape[-1]
@@ -187,30 +191,31 @@ class Trainer:
                 torch.save(to_save, f'cache/{idx + self.params.cache_size * torch.cuda.current_device()}.npy')
             
             # then go through the cache items
-            try:
-                for batch in self.dataloader_sampler:
-                    # in the case you need to start caching new elements
-                    if isinstance(batch, list) == False:
-                        break
-                    if self.global_step % params.num_steps_per_validation == 0:
-                        if self.accelerator.is_main_process:
-                            with torch.no_grad():
-                                self.validate()
-                                self.save_model()
+            for batch in self.dataloader_sampler:
+                # in the case you need to start caching new elements
+                if isinstance(batch, list) == False:
+                    break
+                if self.global_step % params.num_steps_per_validation == 0:
+                    if self.accelerator.is_main_process:
+                        with torch.no_grad():
+                            self.validate()
+                            self.save_model()
 
-                    with self.accelerator.accumulate(self.model):
-                        loss = self.optimize(self.model, batch)
-                        if self.preservation_model != None:
-                            loss = loss + self.params.preservation_ratio * self.optimize(self.preservation_model, batch)
-                        self.accelerator.backward(loss)
-                        self.optimizer.step()
-                        self.optimizer.zero_grad()
-                    
-                    if self.logger != None:
-                        self.logger.add_scalar('train/loss', loss.detach().item(), self.global_step)
-                        progress_bar.update(1)
-                    
-                    self.global_step = self.global_step + 1
-            except RuntimeError as e:
-                # this is normal if we exhaust the cache
-                pass
+                for elem in batch:
+                    elem = elem.to(device=self.accelerator.device)
+                    if self.params.bfloat16:
+                        elem = elem.to(dtype=torch.bfloat16)
+                
+                with self.accelerator.accumulate(self.model):
+                    loss = self.optimize(self.model, batch)
+                    if self.preservation_model != None:
+                        loss = loss + self.params.preservation_ratio * self.optimize(self.preservation_model, batch)
+                    self.accelerator.backward(loss)
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+                
+                if self.logger != None:
+                    self.logger.add_scalar('train/loss', loss.detach().item(), self.global_step)
+                    progress_bar.update(1)
+                
+                self.global_step = self.global_step + 1
