@@ -60,6 +60,12 @@ class TrainingParameters:
         self.steps = int(yaml_root['steps'])
         self.num_steps_per_validation = int(yaml_root['num_steps_per_validation'])
         self.validation_prompts = yaml_root['validation_prompts']
+
+        # precalculate latents and embeddings to save swapping models to speed up training
+        if 'cache_size' in yaml_root.keys():
+            self.cache_size = int(yaml_root['cache_size'])
+        else:
+            self.cache_size = 1000
         
         if 'weight_decay' in yaml_root.keys():
             self.weight_decay = yaml_root['weight_decay']

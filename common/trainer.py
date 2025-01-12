@@ -4,6 +4,7 @@ from accelerate import Accelerator
 import webdataset as wds
 from torch.utils.data import DataLoader
 from common.bucket_sampler import BucketDataset
+from common.bucket_sampler_cache import DataExtractor, BucketDatasetWithCache
 from torch.utils.tensorboard import SummaryWriter
 from webdataset.utils import pytorch_worker_info
 from torch.optim.adamw import AdamW
@@ -13,6 +14,10 @@ from copy import deepcopy
 import bitsandbytes as bnb
 from peft import LoraConfig, get_peft_model, PeftModel
 from peft import LoHaConfig, LoKrConfig
+from accelerate.data_loader import prepare_data_loader
+from torchvision.transforms import Resize
+from accelerate.utils import DataLoaderConfiguration
+import torch.distributed as dist
 
 class Trainer:
     def __init__(self, params : TrainingParameters):
@@ -28,6 +33,8 @@ class Trainer:
         else:
             urls = params.urls
         
+        dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
+        self.accelerator_extractor = Accelerator(dataloader_config=dataloader_config)
         self.accelerator = Accelerator(gradient_accumulation_steps=params.gradient_accumulation_steps)
 
         def split_only_on_main(src, group=None):
@@ -48,17 +55,37 @@ class Trainer:
     def extract_embeddings(self, captions):
         raise NotImplemented
     
+    def find_closest_ratio(self, ratio):
+        # find the closest ratio from the aspect ratios table
+        min_distance = 100
+        target_ratio = 0.6
+        for r in self.aspect_ratios.keys():
+            distance = abs(float(r) - ratio)
+            if min_distance > distance:
+                target_ratio = r
+                min_distance = distance
+        
+        # Return the result as a tuple (target_ratio, idx)
+        return str(target_ratio)
+    
     def initialize(self):
         params = self.params
-        self.bucket_dataset = BucketDataset(self.mix,
-                            params.batch_size,
-                            self.aspect_ratios,
-                            self.accelerator,
-                            self.pipe,
-                            extract_latents_handler=self.extract_latents,
-                            extract_embeddings_handler=self.extract_embeddings)
-        self.dataloader = DataLoader(self.bucket_dataset, batch_size=None)
-        self.dataloader = self.accelerator.prepare_data_loader(self.dataloader)
+
+        self.data_extractor = DataExtractor(self.mix, self.params.cache_size, self.pipe)
+        self.dataloader_extractor = DataLoader(self.data_extractor, batch_size=1)
+        self.dataloader_extractor = self.accelerator_extractor.prepare_data_loader(self.dataloader_extractor)
+
+        self.bucket_sampler = BucketDatasetWithCache(self.params.batch_size,
+                                                     self.params.cache_size,
+                                                     self.aspect_ratios,
+                                                     self.accelerator,
+                                                     self.pipe)
+        
+        def collate_fn(batch):
+            return batch
+        self.dataloader_sampler = DataLoader(self.bucket_sampler, batch_size=None, collate_fn=collate_fn)
+        self.dataloader_sampler = self.accelerator.prepare_data_loader(self.dataloader_sampler)
+
 
         if self.accelerator.is_main_process:
             self.logger = SummaryWriter()
@@ -127,24 +154,63 @@ class Trainer:
 
         progress_bar = tqdm.tqdm(total=params.steps, desc='Num Steps')
         while self.global_step < params.steps:
-            for batch in self.dataloader:
-                if self.global_step % params.num_steps_per_validation == 0:
-                    if self.accelerator.is_main_process:
-                        with torch.no_grad():
-                            self.validate()
-                            self.save_model()
+            # start with the caching
+            for img, caption, idx in self.dataloader_extractor:
+                # decode the caption into a string
+                caption = torch.squeeze(caption)
+                img = torch.squeeze(img)
+                idx = torch.squeeze(idx)
 
-                with self.accelerator.accumulate(self.model):
-                    loss = self.optimize(self.model, batch)
-                    if self.preservation_model != None:
-                        loss = loss + self.params.preservation_ratio * self.optimize(self.preservation_model, batch)
-                    self.accelerator.backward(loss)
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-                
-                if self.logger != None:
-                    self.logger.add_scalar('train/loss', loss.detach().item(), self.global_step)
-                    progress_bar.update(1)
-                
-                self.global_step = self.global_step + 1
-                self.finalize()
+                caption = bytes(caption.tolist()).decode('utf-8')
+                idx = idx.item()
+
+                # find the aspect ratio
+                width = img.shape[-1]
+                height = img.shape[-2]
+                ratio = height / width
+                closest_ratio = self.find_closest_ratio(ratio)
+                height_target = int(self.aspect_ratios[closest_ratio][0])
+                width_target = int(self.aspect_ratios[closest_ratio][1])
+
+                # resize the image
+                resize_transform = Resize((height_target, width_target))
+                img = resize_transform(img)
+
+                # compute the latents and embeddings
+                with torch.no_grad():
+                    latent = self.extract_latents(img)
+                    embedding = self.extract_embeddings(caption)
+
+                # save on the disk
+                embedding = [emb.cpu() for emb in embedding]
+                to_save = (closest_ratio, latent.cpu(), embedding)
+                torch.save(to_save, f'cache/{idx}.npy')
+            
+            # then go through the cache items
+            try:
+                for batch in self.dataloader_sampler:
+                    # in the case you need to start caching new elements
+                    if isinstance(batch, list) == False:
+                        break
+                    if self.global_step % params.num_steps_per_validation == 0:
+                        if self.accelerator.is_main_process:
+                            with torch.no_grad():
+                                self.validate()
+                                self.save_model()
+
+                    with self.accelerator.accumulate(self.model):
+                        loss = self.optimize(self.model, batch)
+                        if self.preservation_model != None:
+                            loss = loss + self.params.preservation_ratio * self.optimize(self.preservation_model, batch)
+                        self.accelerator.backward(loss)
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
+                    
+                    if self.logger != None:
+                        self.logger.add_scalar('train/loss', loss.detach().item(), self.global_step)
+                        progress_bar.update(1)
+                    
+                    self.global_step = self.global_step + 1
+            except RuntimeError as e:
+                # this is normal if we exhaust the cache
+                pass

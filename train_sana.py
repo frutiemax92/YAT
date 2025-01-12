@@ -61,6 +61,12 @@ class SanaTrainer(Trainer):
     def extract_latents(self, images):
         image_processor = self.pipe.image_processor
         images = image_processor.preprocess(images)
+        vae = self.pipe.vae
+
+        # move vae to cuda if it's not already done
+        vae = vae.to(device=self.accelerator.device)
+        if self.params.low_vram:
+            self.pipe.transformer = self.pipe.transformer.cpu()
 
         if self.params.low_vram == False or self.params.batch_size >= 8:
             output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
@@ -76,6 +82,11 @@ class SanaTrainer(Trainer):
         return output * self.pipe.vae.config.scaling_factor
 
     def extract_embeddings(self, captions):
+        # move text_encoder to cuda if not already done
+        self.pipe.text_encoder = self.pipe.text_encoder.to(device=self.accelerator.device)
+        if self.params.low_vram:
+            self.pipe.transformer = self.pipe.transformer.cpu()
+        
         prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
         self.pipe.encode_prompt(captions, do_classifier_free_guidance=False, device=self.accelerator.device)
         return prompt_embeds, prompt_attention_mask
@@ -142,22 +153,24 @@ class SanaTrainer(Trainer):
             idx = idx + 1
     
     def optimize(self, model, batch):
-        if self.params.low_vram and self.accelerator.is_main_process:
-            self.pipe.vae = self.pipe.vae.cpu()
-            self.pipe.text_encoder = self.pipe.text_encoder.cpu()
-            self.pipe.transformer = self.pipe.transformer.to(self.accelerator.device)
+        self.pipe.vae = self.pipe.vae.cpu()
+        self.pipe.text_encoder = self.pipe.text_encoder.cpu()
+        self.pipe.transformer = self.pipe.transformer.to(self.accelerator.device)
         
         params = self.params
         batch_size = params.batch_size
         latents, embeddings, attention_mask = batch
+        latents = latents.to(self.accelerator.device)
+        embeddings = embeddings.to(self.accelerator.device)
+        attention_mask = attention_mask.to(self.accelerator.device)
 
         loss_fn = torch.nn.MSELoss()
         noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=self.pipe.dtype)
 
         u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=1.29)
         indices = (u * self.scheduler.config.num_train_timesteps).long()
-        timesteps = self.scheduler.timesteps[indices].to(latents.device)
-        noisy_model_input = self.scheduler.scale_noise(latents, timesteps, noise)
+        timesteps = self.scheduler.timesteps[indices].to(self.accelerator.device)
+        noisy_model_input = self.scheduler.scale_noise(latents.to(self.accelerator.device), timesteps, noise)
 
         transformer = model
         noise_pred = transformer(noisy_model_input.to(dtype=transformer.dtype),
@@ -167,12 +180,6 @@ class SanaTrainer(Trainer):
         target = noise - latents
         loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
         return loss
-
-    def finalize(self):
-        if self.accelerator.is_main_process and self.params.low_vram:
-            self.pipe.transformer = self.pipe.transformer.cpu()
-            self.pipe.vae = self.pipe.vae.to(self.accelerator.device)
-            self.pipe.text_encoder = self.pipe.text_encoder.to(self.accelerator.device)
         
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
