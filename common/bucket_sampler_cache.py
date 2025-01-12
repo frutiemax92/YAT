@@ -41,7 +41,8 @@ class DataExtractor(IterableDataset):
 
             caption = list(caption.encode('utf-8'))
             caption = torch.tensor(caption, dtype=torch.uint8)
-            yield img, caption, torch.tensor(idx)
+            idx = torch.tensor(idx)
+            yield img.contiguous(), caption.contiguous(), idx
 
 class BucketDatasetWithCache(IterableDataset):
     def __init__(self,
@@ -51,7 +52,7 @@ class BucketDatasetWithCache(IterableDataset):
                  accelerator : Accelerator,
                  pipe):
         super().__init__()
-        self.cache_size = cache_size
+        self.cache_size = cache_size * accelerator.num_processes
         self.total_batch_size = batch_size * accelerator.num_processes
         self.batch_size = batch_size
         self.aspect_ratios = aspect_ratios
@@ -64,7 +65,7 @@ class BucketDatasetWithCache(IterableDataset):
 
     def __iter__(self):
         for idx in tqdm(range(self.cache_size), desc='Processing cache'):
-            ratio, latent, embedding = torch.load(f'cache/{idx}.npy')
+            ratio, latent, embedding = torch.load(f'cache/{idx + self.cache_size * torch.cuda.current_device()}.npy')
 
             # find if this bucket already exists
             if not ratio in self.buckets.keys():

@@ -33,7 +33,7 @@ class Trainer:
         else:
             urls = params.urls
         
-        dataloader_config = DataLoaderConfiguration(dispatch_batches=False)
+        dataloader_config = DataLoaderConfiguration(dispatch_batches=True, split_batches=True)
         self.accelerator_extractor = Accelerator(dataloader_config=dataloader_config)
         self.accelerator = Accelerator(gradient_accumulation_steps=params.gradient_accumulation_steps)
 
@@ -41,12 +41,15 @@ class Trainer:
             """Split the input sequence by PyTorch distributed rank."""
             yield from src
 
-        datasets = [
-            wds.WebDataset(url, shardshuffle=1000, handler=wds.warn_and_continue, nodesplitter=split_only_on_main)
-            .decode("pil", handler=wds.warn_and_continue)  # Decode images as PIL objects
-            .to_tuple(["jpg", 'jpeg'], "txt", handler=wds.warn_and_continue)  # Return image and text
-        for url in urls]
-        self.mix = wds.RandomMix(datasets)
+        dataset = wds.WebDataset(urls, shardshuffle=1000,
+                        handler=wds.ignore_and_continue,
+                        nodesplitter=wds.split_by_node,
+                        workersplitter=wds.split_by_worker).\
+                            shuffle(1000). \
+                            decode("pil", handler=wds.ignore_and_continue).\
+                            to_tuple(["jpg", 'jpeg'], "txt", handler=wds.ignore_and_continue)  # Return image and text
+
+        self.mix = dataset
         self.preservation_model = None
 
     def extract_latents(self, images):
@@ -73,8 +76,6 @@ class Trainer:
 
         self.data_extractor = DataExtractor(self.mix, self.params.cache_size, self.pipe)
         self.dataloader_extractor = DataLoader(self.data_extractor, batch_size=1)
-        self.dataloader_extractor = self.accelerator_extractor.prepare_data_loader(self.dataloader_extractor)
-
         self.bucket_sampler = BucketDatasetWithCache(self.params.batch_size,
                                                      self.params.cache_size,
                                                      self.aspect_ratios,
@@ -159,7 +160,6 @@ class Trainer:
                 # decode the caption into a string
                 caption = torch.squeeze(caption)
                 img = torch.squeeze(img)
-                idx = torch.squeeze(idx)
 
                 caption = bytes(caption.tolist()).decode('utf-8')
                 idx = idx.item()
@@ -178,13 +178,13 @@ class Trainer:
 
                 # compute the latents and embeddings
                 with torch.no_grad():
-                    latent = self.extract_latents(img)
+                    latent = self.extract_latents(img.to(self.accelerator.device))
                     embedding = self.extract_embeddings(caption)
 
                 # save on the disk
                 embedding = [emb.cpu() for emb in embedding]
                 to_save = (closest_ratio, latent.cpu(), embedding)
-                torch.save(to_save, f'cache/{idx}.npy')
+                torch.save(to_save, f'cache/{idx + self.params.cache_size * torch.cuda.current_device()}.npy')
             
             # then go through the cache items
             try:
