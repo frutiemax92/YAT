@@ -15,6 +15,8 @@ For generating WebDatasets, it is highly suggested to use Img2Dataset (https://g
 
 The code also allows for LoRA Finetuning (not Dreambooth) as it can give faster convergence due to a lower parameter count/different reparametrization. Lokr and Loha algorithms are also supported. There is currently a bug in PEFT with the 'conv_depth' module, so do not add that to the target modules.
 
+The trainer creates a `cache` folder, which contains latents and embeddings. This is done to speed up the training process and reducing the VRAM requirements. By default, the number of cache elements is 1000, but you can increase it by specifying `cache_size` in the config file.
+
 This is currently tested under Ubuntu 24.04.1 LTS.
 
 ## How to train
