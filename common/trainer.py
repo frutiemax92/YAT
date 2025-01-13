@@ -36,20 +36,18 @@ class Trainer:
         dataloader_config = DataLoaderConfiguration(dispatch_batches=True, split_batches=True)
         self.accelerator_extractor = Accelerator(dataloader_config=dataloader_config)
         self.accelerator = Accelerator(gradient_accumulation_steps=params.gradient_accumulation_steps)
+        
+        def node_no_split(src):
+            return src
 
-        def split_only_on_main(src, group=None):
-            """Split the input sequence by PyTorch distributed rank."""
-            yield from src
+        datasets = [wds.WebDataset(url, shardshuffle=1000, detshuffle=True, seed=0,
+                handler=wds.ignore_and_continue,
+                nodesplitter=node_no_split).\
+                    decode("pil", handler=wds.ignore_and_continue).\
+                    to_tuple(["jpg", 'jpeg'], "txt", handler=wds.ignore_and_continue) for url in urls]
+        mix = wds.RandomMix(datasets)
 
-        dataset = wds.WebDataset(urls, shardshuffle=1000,
-                        handler=wds.ignore_and_continue,
-                        nodesplitter=wds.split_by_node,
-                        workersplitter=wds.split_by_worker).\
-                            shuffle(1000). \
-                            decode("pil", handler=wds.ignore_and_continue).\
-                            to_tuple(["jpg", 'jpeg'], "txt", handler=wds.ignore_and_continue)  # Return image and text
-
-        self.mix = dataset
+        self.mix = mix
         self.preservation_model = None
 
     def extract_latents(self, images):
@@ -74,7 +72,10 @@ class Trainer:
     def initialize(self):
         params = self.params
 
-        self.data_extractor = DataExtractor(self.mix, self.params.cache_size, self.pipe)
+        self.data_extractor = DataExtractor(self.mix,
+                                            self.params.cache_size,
+                                            self.pipe,
+                                            self.accelerator.num_processes)
         self.dataloader_extractor = DataLoader(self.data_extractor, batch_size=1)
         self.bucket_sampler = BucketDatasetWithCache(self.params.batch_size,
                                                      self.params.cache_size,
@@ -160,7 +161,9 @@ class Trainer:
         while self.global_step < params.steps:
             # start with the caching
             for idx in tqdm.tqdm(range(self.params.cache_size), desc='Caching latents and embeddings'):
-                img, caption = next(self.data_extractor_iter)
+                idx, img, caption = next(self.data_extractor_iter)
+                if idx != self.accelerator.process_index:
+                    continue
 
                 # decode the caption into a string
                 caption = torch.squeeze(caption)

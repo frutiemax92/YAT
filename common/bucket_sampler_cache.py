@@ -18,16 +18,20 @@ class DataExtractor(IterableDataset):
     def __init__(self,
                  dataset,
                  cache_size,
-                 pipe):
+                 pipe,
+                 num_processes):
         super().__init__()
         self.batch_size = 1
         self.dataset = dataset
         self.cache_size = cache_size
         self.dataset_iterator = iter(dataset)
         self.pipe = pipe
+        self.num_processes = num_processes
 
     def __iter__(self):
         while True:
+            idx = 0
+            random.seed(0)
             for img, caption in self.dataset:
                 img = self.pipe.image_processor.pil_to_numpy(img)
                 img = torch.tensor(img).to(dtype=self.pipe.dtype)
@@ -35,7 +39,8 @@ class DataExtractor(IterableDataset):
 
                 caption = list(caption.encode('utf-8'))
                 caption = torch.tensor(caption, dtype=torch.uint8)
-                yield img.contiguous(), caption.contiguous()
+                yield idx, img.contiguous(), caption.contiguous()
+                idx = (idx + 1) % self.num_processes
 
 class BucketDatasetWithCache(IterableDataset):
     def __init__(self,
