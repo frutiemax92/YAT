@@ -165,10 +165,10 @@ class Trainer:
         progress_bar = tqdm.tqdm(total=params.steps, desc='Num Steps')
         while self.global_step < params.steps:
             # start with the caching
-            for cache_idx in tqdm.tqdm(range(self.params.cache_size * self.accelerator.num_processes), desc=f'Caching latents and embeddings'):
+            for cache_idx in tqdm.tqdm(range(self.params.cache_size), desc=f'Caching latents and embeddings'):
                 idx, img, caption = next(self.data_extractor_iter)
-                if idx != torch.cuda.current_device():
-                    continue
+                while idx != torch.cuda.current_device():
+                    idx, img, caption = next(self.data_extractor_iter)
 
                 # decode the caption into a string
                 caption = torch.squeeze(caption)
@@ -196,7 +196,7 @@ class Trainer:
                 # save on the disk
                 embedding = [emb.cpu() for emb in embedding]
                 to_save = (closest_ratio, latent.cpu(), embedding)
-                torch.save(to_save, f'cache/{cache_idx}.npy')
+                torch.save(to_save, f'cache/{cache_idx + idx * self.params.cache_size}.npy')
             
             # then go through the cache items
             self.accelerator.wait_for_everyone()
