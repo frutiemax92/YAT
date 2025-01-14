@@ -22,7 +22,8 @@ class DataExtractor(IterableDataset):
                  cache_size,
                  pipe,
                  num_processes,
-                 seed):
+                 seed,
+                 process_index):
         super().__init__()
         self.batch_size = 1
         self.dataset = dataset
@@ -31,25 +32,17 @@ class DataExtractor(IterableDataset):
         self.pipe = pipe
         self.num_processes = num_processes
         self.seed = seed
+        self.process_index = process_index
 
     def __iter__(self):
+        tqdm.write(f'Process Index = {self.process_index}')
         while True:
-            idx = 0
             random.seed(self.seed)
-            cache_counter = 0
             for img, caption in self.dataset:
                 img = self.pipe.image_processor.pil_to_numpy(img)
                 img = torch.tensor(img).to(dtype=self.pipe.dtype)
                 img = torch.moveaxis(img, -1, 1)
-
-                caption = list(caption.encode('utf-8'))
-                caption = torch.tensor(caption, dtype=torch.uint8)
-                yield idx, img.contiguous(), caption.contiguous()
-
-                cache_counter = cache_counter + 1
-                if cache_counter >= self.cache_size:
-                    cache_counter = 0
-                    idx = (idx + 1) % self.num_processes
+                yield img, caption
 
 class BucketDatasetWithCache(IterableDataset):
     def __init__(self,
@@ -112,6 +105,9 @@ class BucketDatasetWithCache(IterableDataset):
                         embeddings.clear()
                         current_batch = current_batch + 1
                 self.buckets.pop(ratio)
+        
+        for j in range(self.accelerator.num_processes):
+            yield torch.tensor([i for i in range(self.batch_size)])
 
 if __name__ == '__main__':
     test = [1, 3, 4, 5]

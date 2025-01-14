@@ -1,3 +1,4 @@
+import PIL.Image
 from common.training_parameters_reader import TrainingParameters
 from common.cloudflare import get_secured_urls
 from accelerate import Accelerator
@@ -19,6 +20,7 @@ from torchvision.transforms import Resize
 from accelerate.utils import DataLoaderConfiguration
 import torch.distributed as dist
 import os
+import PIL
 
 class Trainer:
     def __init__(self, params : TrainingParameters):
@@ -34,8 +36,6 @@ class Trainer:
         else:
             urls = params.urls
         
-        dataloader_config = DataLoaderConfiguration(dispatch_batches=True, split_batches=True)
-        self.accelerator_extractor = Accelerator(dataloader_config=dataloader_config)
         self.accelerator = Accelerator(gradient_accumulation_steps=params.gradient_accumulation_steps)
         
         def node_no_split(src):
@@ -77,14 +77,21 @@ class Trainer:
                                             self.params.cache_size,
                                             self.pipe,
                                             torch.cuda.device_count(),
-                                            self.params.dataset_seed)
+                                            self.params.dataset_seed,
+                                            self.accelerator.process_index)
         self.dataloader_extractor = DataLoader(self.data_extractor, batch_size=1)
+        # self.dataloader_extractor = prepare_data_loader(self.dataloader_extractor,
+        #                                                 split_batches=True,
+        #                                                 dispatch_batches=True,
+        #                                                 #put_on_device=True
+        #                                                 )
+
         self.bucket_sampler = BucketDatasetWithCache(self.params.batch_size,
                                                      self.params.cache_size,
                                                      self.aspect_ratios,
                                                      self.accelerator,
                                                      self.pipe)
-        self.data_extractor_iter = iter(self.data_extractor)
+        self.data_extractor_iter = iter(self.dataloader_extractor)
         
         def collate_fn(batch):
             return batch
@@ -163,18 +170,28 @@ class Trainer:
         self.initialize()
 
         progress_bar = tqdm.tqdm(total=params.steps, desc='Num Steps')
-        while self.global_step < params.steps:
-            # start with the caching
-            for cache_idx in tqdm.tqdm(range(self.params.cache_size), desc=f'Caching latents and embeddings'):
-                idx, img, caption = next(self.data_extractor_iter)
-                while idx != torch.cuda.current_device():
-                    idx, img, caption = next(self.data_extractor_iter)
 
+        while self.global_step < self.params.steps:
+            cache_idx = 0
+            if self.accelerator.is_main_process:
+                for cache_idx in tqdm.tqdm(range(self.params.cache_size * self.accelerator.num_processes), desc='Downloading images and captions'):
+                    img, caption = next(self.data_extractor_iter)
+                    torch.save(img[0], f'cache/{cache_idx}.mpy')
+                    with open(f'cache/{cache_idx}.txt', 'w') as f:
+                        f.write(caption[0])
+
+            self.accelerator.wait_for_everyone()
+            for cache_idx in tqdm.tqdm(range(self.accelerator.process_index,
+                                             self.params.cache_size * self.accelerator.num_processes,
+                                             self.accelerator.num_processes), 
+                                        desc='Extracting latents and captions'):
+                img = torch.load(f'cache/{cache_idx}.mpy')
+                with open(f'cache/{cache_idx}.txt') as f:
+                    caption = f.read()
+            
+                # start with the caching
                 # decode the caption into a string
-                caption = torch.squeeze(caption)
                 img = torch.squeeze(img)
-
-                caption = bytes(caption.tolist()).decode('utf-8')
 
                 # find the aspect ratio
                 width = img.shape[-1]
@@ -186,7 +203,7 @@ class Trainer:
 
                 # resize the image
                 resize_transform = Resize((height_target, width_target))
-                img = resize_transform(img)
+                img = resize_transform(img.cpu())
 
                 # compute the latents and embeddings
                 with torch.no_grad():
@@ -196,9 +213,11 @@ class Trainer:
                 # save on the disk
                 embedding = [emb.cpu() for emb in embedding]
                 to_save = (closest_ratio, latent.cpu(), embedding)
-                torch.save(to_save, f'cache/{cache_idx + idx * self.params.cache_size}.npy')
-            
+                torch.save(to_save, f'cache/{cache_idx}.npy')
+
+                
             # then go through the cache items
+            self.accelerator.wait_for_everyone()
             for batch in self.dataloader_sampler:
                 # in the case you need to start caching new elements
                 if isinstance(batch, list) == False:
