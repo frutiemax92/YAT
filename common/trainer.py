@@ -199,7 +199,6 @@ class Trainer:
                 torch.save(to_save, f'cache/{cache_idx + idx * self.params.cache_size}.npy')
             
             # then go through the cache items
-            self.accelerator.wait_for_everyone()
             for batch in self.dataloader_sampler:
                 # in the case you need to start caching new elements
                 if isinstance(batch, list) == False:
