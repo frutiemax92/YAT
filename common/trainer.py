@@ -76,7 +76,8 @@ class Trainer:
         self.data_extractor = DataExtractor(self.mix,
                                             self.params.cache_size,
                                             self.pipe,
-                                            self.accelerator.num_processes)
+                                            self.accelerator.num_processes,
+                                            self.params.dataset_seed)
         self.dataloader_extractor = DataLoader(self.data_extractor, batch_size=1)
         self.bucket_sampler = BucketDatasetWithCache(self.params.batch_size,
                                                      self.params.cache_size,

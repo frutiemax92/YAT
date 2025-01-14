@@ -9,6 +9,7 @@ class TrainingParameters:
         self.r2_secret_key = None
         self.r2_bucket_name = None
         self.r2_tar_files = None
+        self.dataset_seed = 0
 
         self.batch_size = 4
         self.pretrained_pipe_path = None
@@ -49,6 +50,9 @@ class TrainingParameters:
             self.r2_tar_files = yaml_root['r2_tar_files']
         else:
             self.urls = yaml_root['urls']
+        
+        if 'dataset_seed' in yaml_root.keys():
+            self.dataset_seed = int(yaml_root['dataset_seed'])
         
         self.batch_size = int(yaml_root['batch_size'])
         self.pretrained_pipe_path = yaml_root['pretrained_pipe_path']

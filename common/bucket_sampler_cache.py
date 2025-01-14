@@ -19,7 +19,8 @@ class DataExtractor(IterableDataset):
                  dataset,
                  cache_size,
                  pipe,
-                 num_processes):
+                 num_processes,
+                 seed):
         super().__init__()
         self.batch_size = 1
         self.dataset = dataset
@@ -27,11 +28,12 @@ class DataExtractor(IterableDataset):
         self.dataset_iterator = iter(dataset)
         self.pipe = pipe
         self.num_processes = num_processes
+        self.seed = seed
 
     def __iter__(self):
         while True:
             idx = 0
-            random.seed(0)
+            random.seed(self.seed)
             for img, caption in self.dataset:
                 img = self.pipe.image_processor.pil_to_numpy(img)
                 img = torch.tensor(img).to(dtype=self.pipe.dtype)
