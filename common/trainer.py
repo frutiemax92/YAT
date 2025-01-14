@@ -165,7 +165,7 @@ class Trainer:
         progress_bar = tqdm.tqdm(total=params.steps, desc='Num Steps')
         while self.global_step < params.steps:
             # start with the caching
-            for idx in tqdm.tqdm(range(self.params.cache_size), desc='Caching latents and embeddings'):
+            for cache_idx in tqdm.tqdm(range(self.params.cache_size), desc='Caching latents and embeddings'):
                 idx, img, caption = next(self.data_extractor_iter)
                 if idx != self.accelerator.process_index:
                     continue
@@ -196,9 +196,10 @@ class Trainer:
                 # save on the disk
                 embedding = [emb.cpu() for emb in embedding]
                 to_save = (closest_ratio, latent.cpu(), embedding)
-                torch.save(to_save, f'cache/{idx + self.params.cache_size * torch.cuda.current_device()}.npy')
+                torch.save(to_save, f'cache/{cache_idx + self.params.cache_size * torch.cuda.current_device()}.npy')
             
             # then go through the cache items
+            self.accelerator.wait_for_everyone()
             for batch in self.dataloader_sampler:
                 # in the case you need to start caching new elements
                 if isinstance(batch, list) == False:
