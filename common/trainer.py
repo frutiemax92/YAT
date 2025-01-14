@@ -18,6 +18,7 @@ from accelerate.data_loader import prepare_data_loader
 from torchvision.transforms import Resize
 from accelerate.utils import DataLoaderConfiguration
 import torch.distributed as dist
+import os
 
 class Trainer:
     def __init__(self, params : TrainingParameters):
@@ -92,6 +93,9 @@ class Trainer:
 
         if self.accelerator.is_main_process:
             self.logger = SummaryWriter()
+
+            # also create a folder for the models under training
+            os.makedirs('models', exist_ok=True)
         else:
             self.logger = None
         
@@ -150,7 +154,7 @@ class Trainer:
         pass
 
     def save_model(self):
-        self.model.save_pretrained(f'{self.global_step}')
+        self.model.save_pretrained(f'models/{self.global_step}')
         self.pipe = self.pipe.to(torch.bfloat16)
 
     def run(self):
