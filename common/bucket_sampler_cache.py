@@ -9,6 +9,8 @@ from accelerate import Accelerator
 from diffusers import SanaPAGPipeline
 import os
 import gc
+import numpy as np
+import shutil
 
 def flush():
     gc.collect()
@@ -34,6 +36,7 @@ class DataExtractor(IterableDataset):
         while True:
             idx = 0
             random.seed(self.seed)
+            cache_counter = 0
             for img, caption in self.dataset:
                 img = self.pipe.image_processor.pil_to_numpy(img)
                 img = torch.tensor(img).to(dtype=self.pipe.dtype)
@@ -42,7 +45,11 @@ class DataExtractor(IterableDataset):
                 caption = list(caption.encode('utf-8'))
                 caption = torch.tensor(caption, dtype=torch.uint8)
                 yield idx, img.contiguous(), caption.contiguous()
-                idx = (idx + 1) % self.num_processes
+
+                cache_counter = cache_counter + 1
+                if cache_counter >= self.cache_size:
+                    cache_counter = 0
+                    idx = (idx + 1) % self.num_processes
 
 class BucketDatasetWithCache(IterableDataset):
     def __init__(self,
@@ -61,14 +68,17 @@ class BucketDatasetWithCache(IterableDataset):
         self.buckets = {}
 
         # create the cache folder
-        os.makedirs('cache', exist_ok=True)
+        if self.accelerator.is_main_process:
+            if os.path.exists('cache'):
+                shutil.rmtree('cache')
+            os.makedirs('cache', exist_ok=True)
     
     def __len__(self):
         return self.cache_size
     
     def __iter__(self):
         for idx in tqdm(range(self.cache_size), desc='Processing cache'):
-            ratio, latent, embedding = torch.load(f'cache/{idx + self.cache_size * torch.cuda.current_device()}.npy')
+            ratio, latent, embedding = torch.load(f'cache/{idx}.npy')
 
             # find if this bucket already exists
             if not ratio in self.buckets.keys():

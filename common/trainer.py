@@ -76,7 +76,7 @@ class Trainer:
         self.data_extractor = DataExtractor(self.mix,
                                             self.params.cache_size,
                                             self.pipe,
-                                            self.accelerator.num_processes,
+                                            torch.cuda.device_count(),
                                             self.params.dataset_seed)
         self.dataloader_extractor = DataLoader(self.data_extractor, batch_size=1)
         self.bucket_sampler = BucketDatasetWithCache(self.params.batch_size,
@@ -165,9 +165,9 @@ class Trainer:
         progress_bar = tqdm.tqdm(total=params.steps, desc='Num Steps')
         while self.global_step < params.steps:
             # start with the caching
-            for cache_idx in tqdm.tqdm(range(self.params.cache_size), desc='Caching latents and embeddings'):
+            for cache_idx in tqdm.tqdm(range(self.params.cache_size * self.accelerator.num_processes), desc=f'Caching latents and embeddings'):
                 idx, img, caption = next(self.data_extractor_iter)
-                if idx != self.accelerator.process_index:
+                if idx != torch.cuda.current_device():
                     continue
 
                 # decode the caption into a string
@@ -196,7 +196,7 @@ class Trainer:
                 # save on the disk
                 embedding = [emb.cpu() for emb in embedding]
                 to_save = (closest_ratio, latent.cpu(), embedding)
-                torch.save(to_save, f'cache/{cache_idx + self.params.cache_size * torch.cuda.current_device()}.npy')
+                torch.save(to_save, f'cache/{cache_idx}.npy')
             
             # then go through the cache items
             self.accelerator.wait_for_everyone()
