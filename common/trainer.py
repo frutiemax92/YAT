@@ -19,6 +19,7 @@ from accelerate.data_loader import prepare_data_loader
 from torchvision.transforms import Resize
 from accelerate.utils import DataLoaderConfiguration
 import torch.distributed as dist
+import shutil
 import os
 import PIL
 
@@ -180,14 +181,19 @@ class Trainer:
                     with open(f'cache/{cache_idx}.txt', 'w') as f:
                         f.write(caption[0])
 
-            self.accelerator.wait_for_everyone()
             for cache_idx in tqdm.tqdm(range(self.accelerator.process_index,
                                              self.params.cache_size * self.accelerator.num_processes,
                                              self.accelerator.num_processes), 
                                         desc='Extracting latents and captions'):
-                img = torch.load(f'cache/{cache_idx}.mpy')
-                with open(f'cache/{cache_idx}.txt') as f:
-                    caption = f.read()
+                # try to read the image and caption when they're available
+                while True:
+                    try:
+                        img = torch.load(f'cache/{cache_idx}.mpy')
+                        with open(f'cache/{cache_idx}.txt') as f:
+                            caption = f.read()
+                        break
+                    except:
+                        continue
             
                 # start with the caching
                 # decode the caption into a string
@@ -246,3 +252,9 @@ class Trainer:
                     progress_bar.update(1)
                 
                 self.global_step = self.global_step + 1
+            
+            # delete the cache
+            if self.accelerator.is_main_process:
+                if os.path.exists('cache'):
+                    shutil.rmtree('cache')
+            self.accelerator.wait_for_everyone()
