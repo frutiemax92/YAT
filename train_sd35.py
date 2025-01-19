@@ -64,8 +64,8 @@ class SD35Trainer(Trainer):
         images = image_processor.preprocess(images)
         output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent_dist.sample()
 
-        if self.params.low_vram:
-            vae = vae.cpu()
+        #if self.params.low_vram:
+            #vae = vae.cpu()
         return output * self.pipe.vae.config.scaling_factor
 
     def extract_embeddings(self, captions):
@@ -76,10 +76,10 @@ class SD35Trainer(Trainer):
         prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
         self.pipe.encode_prompt(prompt=captions, prompt_2=captions, prompt_3=captions, do_classifier_free_guidance=False, device=self.accelerator.device)
 
-        if self.params.low_vram:
-            text_encoder = text_encoder.cpu()
-            text_encoder_2 = text_encoder_2.cpu()
-            text_encoder_3 = text_encoder_3.cpu()
+        #if self.params.low_vram:
+            #text_encoder = text_encoder.cpu()
+            #text_encoder_2 = text_encoder_2.cpu()
+            #text_encoder_3 = text_encoder_3.cpu()
         return prompt_embeds, pooled_prompt_embeds
     
     def validate(self):

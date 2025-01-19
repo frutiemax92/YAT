@@ -166,7 +166,7 @@ class Trainer:
         self.model.save_pretrained(f'models/{self.global_step}')
         self.pipe = self.pipe.to(torch.bfloat16)
 
-    def cache_latents_embeddings(self, img, cache_idx):
+    def cache_latents_embeddings(self, img, caption, cache_idx):
         img = torch.squeeze(img)
 
         # find the aspect ratio
@@ -213,9 +213,9 @@ class Trainer:
                         with open(f'cache/{cache_idx}.txt', 'w') as f:
                             f.write(caption[0])
                     else:
-                        self.cache_latents_embeddings(img, cache_idx)
+                        self.cache_latents_embeddings(img, caption, cache_idx)
                 else:
-                                        # try to read the image and caption when they're available
+                    # try to read the image and caption when they're available
                     while True:
                         try:
                             img = torch.load(f'cache/{cache_idx}.mpy')
@@ -226,7 +226,7 @@ class Trainer:
                             continue
                 
                     # start with the caching
-                    self.cache_latents_embeddings(img, cache_idx)
+                    self.cache_latents_embeddings(img, caption, cache_idx)
                 
             # then go through the cache items
             self.accelerator.wait_for_everyone()
