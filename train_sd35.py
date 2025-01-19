@@ -12,13 +12,25 @@ from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
 from common.trainer import Trainer
-import bitsandbytes as bnb
+from diffusers import BitsAndBytesConfig
+from transformers import T5EncoderModel
 
 class SD35Trainer(Trainer):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
+        
         if params.bfloat16:
-            self.pipe = StableDiffusion3Pipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16)
+            if self.params.low_vram:
+                # put the T5 model as 8 bits
+                config_8bit = BitsAndBytesConfig(load_in_8bit=True)
+                text_encoder_3 = T5EncoderModel.from_pretrained(params.pretrained_pipe_path,
+                                                                subfolder='text_encoder_3',
+                                                                quantization_config=config_8bit)
+                self.pipe = StableDiffusion3Pipeline.from_pretrained(params.pretrained_pipe_path,
+                                                                     text_encoder_3=text_encoder_3,
+                                                                     torch_dtype=torch.bfloat16)
+            else:
+                self.pipe = StableDiffusion3Pipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16)
         else:
             self.pipe = StableDiffusion3Pipeline.from_pretrained(params.pretrained_pipe_path)
         if params.pretrained_model_path != None:
@@ -37,13 +49,6 @@ class SD35Trainer(Trainer):
         self.pipe.text_encoder.train(False)
         self.pipe.text_encoder_2.train(False)
         self.pipe.text_encoder_3.train(False)
-
-        if params.bfloat16:
-            self.pipe.vae = self.pipe.vae.to(torch.bfloat16)
-            self.pipe.text_encoder = self.pipe.text_encoder.to(torch.bfloat16)
-            self.pipe.text_encoder_2 = self.pipe.text_encoder_2.to(torch.bfloat16)
-            self.pipe.text_encoder_3 = self.pipe.text_encoder_3.to(torch.bfloat16)
-            self.pipe.transformer = self.pipe.transformer.to(torch.bfloat16)
 
         self.aspect_ratios = ASPECT_RATIO_1024_BIN
         if params.bfloat16:
@@ -72,7 +77,7 @@ class SD35Trainer(Trainer):
         if self.params.low_vram:
             text_encoder = self.pipe.text_encoder.to(self.accelerator.device)
             text_encoder_2 = self.pipe.text_encoder_2.to(self.accelerator.device)
-            text_encoder_3 = self.pipe.text_encoder_3.to(self.accelerator.device)
+            #text_encoder_3 = self.pipe.text_encoder_3.to(self.accelerator.device)
         prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
         self.pipe.encode_prompt(prompt=captions, prompt_2=captions, prompt_3=captions, do_classifier_free_guidance=False, device=self.accelerator.device)
 
