@@ -166,6 +166,31 @@ class Trainer:
         self.model.save_pretrained(f'models/{self.global_step}')
         self.pipe = self.pipe.to(torch.bfloat16)
 
+    def cache_latents_embeddings(self, img, cache_idx):
+        img = torch.squeeze(img)
+
+        # find the aspect ratio
+        width = img.shape[-1]
+        height = img.shape[-2]
+        ratio = height / width
+        closest_ratio = self.find_closest_ratio(ratio)
+        height_target = int(self.aspect_ratios[closest_ratio][0])
+        width_target = int(self.aspect_ratios[closest_ratio][1])
+
+        # resize the image
+        resize_transform = Resize((height_target, width_target))
+        img = resize_transform(img.cpu())
+
+        # compute the latents and embeddings
+        with torch.no_grad():
+            latent = self.extract_latents(img.to(self.accelerator.device))
+            embedding = self.extract_embeddings(caption[0])
+
+        # save on the disk
+        embedding = [emb.cpu() for emb in embedding]
+        to_save = (closest_ratio, latent.cpu(), embedding)
+        torch.save(to_save, f'cache/{cache_idx}.npy')
+    
     def run(self):
         params = self.params
         self.initialize()
@@ -174,8 +199,13 @@ class Trainer:
 
         while self.global_step < self.params.steps:
             cache_idx = 0
-            if self.accelerator.is_main_process:
-                for cache_idx in tqdm.tqdm(range(self.params.cache_size * self.accelerator.num_processes), desc='Extracting latents and captions'):
+
+            # swap the model to the cpu while caching
+            if self.params.low_vram:
+                self.model = self.model.cpu()
+
+            for cache_idx in tqdm.tqdm(range(self.params.cache_size * self.accelerator.num_processes), desc='Extracting latents and captions'):
+                if self.accelerator.is_main_process:
                     img, caption = next(self.data_extractor_iter)
 
                     if cache_idx % self.accelerator.num_processes != 0:
@@ -183,37 +213,9 @@ class Trainer:
                         with open(f'cache/{cache_idx}.txt', 'w') as f:
                             f.write(caption[0])
                     else:
-                        img = torch.squeeze(img)
-
-                        # find the aspect ratio
-                        width = img.shape[-1]
-                        height = img.shape[-2]
-                        ratio = height / width
-                        closest_ratio = self.find_closest_ratio(ratio)
-                        height_target = int(self.aspect_ratios[closest_ratio][0])
-                        width_target = int(self.aspect_ratios[closest_ratio][1])
-
-                        # resize the image
-                        resize_transform = Resize((height_target, width_target))
-                        img = resize_transform(img.cpu())
-
-                        # compute the latents and embeddings
-                        with torch.no_grad():
-                            latent = self.extract_latents(img.to(self.accelerator.device))
-                            embedding = self.extract_embeddings(caption[0])
-
-                        # save on the disk
-                        embedding = [emb.cpu() for emb in embedding]
-                        to_save = (closest_ratio, latent.cpu(), embedding)
-                        torch.save(to_save, f'cache/{cache_idx}.npy')
-
-
-            else:
-                for cache_idx in tqdm.tqdm(range(self.accelerator.process_index,
-                                                self.params.cache_size * self.accelerator.num_processes,
-                                                self.accelerator.num_processes), 
-                                            desc='Extracting latents and captions'):
-                    # try to read the image and caption when they're available
+                        self.cache_latents_embeddings(img, cache_idx)
+                else:
+                                        # try to read the image and caption when they're available
                     while True:
                         try:
                             img = torch.load(f'cache/{cache_idx}.mpy')
@@ -224,31 +226,7 @@ class Trainer:
                             continue
                 
                     # start with the caching
-                    # decode the caption into a string
-                    img = torch.squeeze(img)
-
-                    # find the aspect ratio
-                    width = img.shape[-1]
-                    height = img.shape[-2]
-                    ratio = height / width
-                    closest_ratio = self.find_closest_ratio(ratio)
-                    height_target = int(self.aspect_ratios[closest_ratio][0])
-                    width_target = int(self.aspect_ratios[closest_ratio][1])
-
-                    # resize the image
-                    resize_transform = Resize((height_target, width_target))
-                    img = resize_transform(img.cpu())
-
-                    # compute the latents and embeddings
-                    with torch.no_grad():
-                        latent = self.extract_latents(img.to(self.accelerator.device))
-                        embedding = self.extract_embeddings(caption)
-
-                    # save on the disk
-                    embedding = [emb.cpu() for emb in embedding]
-                    to_save = (closest_ratio, latent.cpu(), embedding)
-                    torch.save(to_save, f'cache/{cache_idx}.npy')
-
+                    self.cache_latents_embeddings(img, cache_idx)
                 
             # then go through the cache items
             self.accelerator.wait_for_everyone()

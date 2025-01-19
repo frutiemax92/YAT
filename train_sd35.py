@@ -24,6 +24,7 @@ class SD35Trainer(Trainer):
         if params.pretrained_model_path != None:
             transformer = SD3Transformer2DModel.from_pretrained(params.pretrained_model_path)
             self.pipe.transformer = transformer
+        self.pipe.enable_model_cpu_offload()
 
         # required for lower vram consumption
         self.pipe.transformer.gradient_checkpointing = True
@@ -51,29 +52,34 @@ class SD35Trainer(Trainer):
     
     def initialize(self):
         super().initialize()
-        text_encoder = self.pipe.text_encoder
-        text_encoder_2 = self.pipe.text_encoder_2
-        text_encoder_3 = self.pipe.text_encoder_3
-        vae = self.pipe.vae
-        transformer = self.pipe.transformer
-
-        # we only encode/decode on the first gpu
-        if self.accelerator.is_main_process:
-            text_encoder = text_encoder.to(device=self.accelerator.device)
-            text_encoder_2 = text_encoder_2.to(device=self.accelerator.device)
-            text_encoder_3 = text_encoder_3.to(device=self.accelerator.device)
-            vae = vae.to(device=self.accelerator.device)
-        transformer = transformer.to(device=self.accelerator.device)
+        if self.params.low_vram != True:
+            self.pipe = self.pipe.to(self.accelerator.device)
     
     def extract_latents(self, images):
+        if self.params.low_vram:
+            vae = self.pipe.vae
+            vae = vae.to(self.accelerator.device)
+
         image_processor = self.pipe.image_processor
         images = image_processor.preprocess(images)
         output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent_dist.sample()
+
+        if self.params.low_vram:
+            vae = vae.cpu()
         return output * self.pipe.vae.config.scaling_factor
 
     def extract_embeddings(self, captions):
+        if self.params.low_vram:
+            text_encoder = self.pipe.text_encoder.to(self.accelerator.device)
+            text_encoder_2 = self.pipe.text_encoder_2.to(self.accelerator.device)
+            text_encoder_3 = self.pipe.text_encoder_3.to(self.accelerator.device)
         prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
         self.pipe.encode_prompt(prompt=captions, prompt_2=captions, prompt_3=captions, do_classifier_free_guidance=False, device=self.accelerator.device)
+
+        if self.params.low_vram:
+            text_encoder = text_encoder.cpu()
+            text_encoder_2 = text_encoder_2.cpu()
+            text_encoder_3 = text_encoder_3.cpu()
         return prompt_embeds, pooled_prompt_embeds
     
     def validate(self):
@@ -134,21 +140,6 @@ class SD35Trainer(Trainer):
         target = noise - latents
         loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
         return loss
-
-    def finalize(self):
-        if self.accelerator.is_main_process:
-            # we need to reswap the vae and text encoders to gpu and transformer to cpu
-            text_encoder = self.pipe.text_encoder
-            text_encoder_2 = self.pipe.text_encoder_2
-            text_encoder_3 = self.pipe.text_encoder_3
-            vae = self.pipe.vae
-            transformer = self.pipe.transformer
-
-            transformer = transformer.cpu()
-            text_encoder = text_encoder.to(self.accelerator.device)
-            text_encoder_2 = text_encoder_2.to(self.accelerator.device)
-            text_encoder_3 = text_encoder_3.to(self.accelerator.device)
-            vae = vae.to(self.accelerator.device)
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

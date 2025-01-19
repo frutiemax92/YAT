@@ -65,8 +65,6 @@ class SanaTrainer(Trainer):
 
         # move vae to cuda if it's not already done
         vae = vae.to(device=self.accelerator.device)
-        if self.params.low_vram:
-            self.pipe.transformer = self.pipe.transformer.cpu()
 
         if self.params.low_vram == False or self.params.batch_size >= 8:
             output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
@@ -84,8 +82,6 @@ class SanaTrainer(Trainer):
     def extract_embeddings(self, captions):
         # move text_encoder to cuda if not already done
         self.pipe.text_encoder = self.pipe.text_encoder.to(device=self.accelerator.device)
-        if self.params.low_vram:
-            self.pipe.transformer = self.pipe.transformer.cpu()
         
         prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
         self.pipe.encode_prompt(captions, do_classifier_free_guidance=False, device=self.accelerator.device)
