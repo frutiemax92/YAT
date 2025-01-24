@@ -204,7 +204,13 @@ class Trainer:
             if self.params.low_vram:
                 self.model = self.model.cpu()
 
-            for cache_idx in tqdm.tqdm(range(self.params.cache_size * self.accelerator.num_processes), desc='Extracting latents and captions'):
+            if self.accelerator.is_main_process:
+                it = range(self.params.cache_size * self.accelerator.num_processes)
+            else:
+                it = range(self.accelerator.process_index,
+                                                self.params.cache_size * self.accelerator.num_processes,
+                                                self.accelerator.num_processes)
+            for cache_idx in tqdm.tqdm(it, desc='Extracting latents and captions'):
                 if self.accelerator.is_main_process:
                     img, caption = next(self.data_extractor_iter)
 
