@@ -53,7 +53,7 @@ class TrainingParameters:
             self.urls = yaml_root['urls']
         
         if 'url_probs' in yaml_root.keys():
-            self.url_probs = yaml_root['url_probs']
+            self.url_probs = [float(prob) for prob in yaml_root['url_probs']]
         
         if 'dataset_seed' in yaml_root.keys():
             self.dataset_seed = int(yaml_root['dataset_seed'])
