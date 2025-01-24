@@ -24,6 +24,7 @@ class TrainingParameters:
         self.output_repo = None
         self.use_preservation = None
         self.preservation_ratio = None
+        self.url_probs = None
 
         # lora
         self.lora_target_modules = None
@@ -50,6 +51,9 @@ class TrainingParameters:
             self.r2_tar_files = yaml_root['r2_tar_files']
         else:
             self.urls = yaml_root['urls']
+        
+        if 'url_probs' in yaml_root.keys():
+            self.url_probs = yaml_root['url_probs']
         
         if 'dataset_seed' in yaml_root.keys():
             self.dataset_seed = int(yaml_root['dataset_seed'])

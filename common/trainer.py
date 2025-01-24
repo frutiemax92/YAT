@@ -47,7 +47,7 @@ class Trainer:
                 nodesplitter=node_no_split).\
                     decode("pil", handler=wds.ignore_and_continue).\
                     to_tuple(["jpg", 'jpeg'], "txt", handler=wds.ignore_and_continue) for url in urls]
-        mix = wds.RandomMix(datasets)
+        mix = wds.RandomMix(datasets, params.url_probs)
 
         self.mix = mix
         self.preservation_model = None
