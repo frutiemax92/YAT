@@ -184,7 +184,7 @@ class Trainer:
         # compute the latents and embeddings
         with torch.no_grad():
             latent = self.extract_latents(img.to(self.accelerator.device))
-            embedding = self.extract_embeddings(caption[0])
+            embedding = self.extract_embeddings(caption)
 
         # save on the disk
         embedding = [emb.cpu() for emb in embedding]
@@ -219,7 +219,7 @@ class Trainer:
                         with open(f'cache/{cache_idx}.txt', 'w') as f:
                             f.write(caption[0])
                     else:
-                        self.cache_latents_embeddings(img, caption, cache_idx)
+                        self.cache_latents_embeddings(img, caption[0], cache_idx)
                 else:
                     # try to read the image and caption when they're available
                     while True:
