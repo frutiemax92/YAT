@@ -39,7 +39,7 @@ class SanaTrainer(Trainer):
         if params.bfloat16:
             self.pipe = self.pipe.to(torch.bfloat16)
         self.model = self.pipe.transformer
-        self.model.gradient_checkpointing = True
+        self.model.enable_gradient_checkpointing()
     
     def initialize(self):
         super().initialize()
