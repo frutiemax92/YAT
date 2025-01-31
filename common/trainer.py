@@ -19,6 +19,7 @@ from accelerate.data_loader import prepare_data_loader
 from torchvision.transforms import Resize
 from accelerate.utils import DataLoaderConfiguration
 import torch.distributed as dist
+from torch.optim.lr_scheduler import CyclicLR
 import shutil
 import os
 import PIL
@@ -152,6 +153,15 @@ class Trainer:
             self.optimizer = AdamW(params_to_optimizer,
                                    lr=params.learning_rate,
                                    weight_decay=params.weight_decay)
+        
+        self.lr_scheduler = None
+        if params.cyclic_lr_max_lr != None:
+            self.lr_scheduler = CyclicLR(optimizer=self.optimizer,
+                                    base_lr=params.learning_rate,
+                                    max_lr=params.cyclic_lr_max_lr,
+                                    step_size_up=params.cyclic_lr_step_size_up,
+                                    step_size_down=params.cyclic_lr_step_size_down,
+                                    mode=params.cylic_lr_mode)
 
     def validate(self):
         raise NotImplemented
@@ -235,7 +245,6 @@ class Trainer:
                     self.cache_latents_embeddings(img, caption, cache_idx)
                 
             # then go through the cache items
-            self.accelerator.wait_for_everyone()
             for batch in self.dataloader_sampler:
                 # in the case you need to start caching new elements
                 if isinstance(batch, list) == False:
@@ -257,10 +266,17 @@ class Trainer:
                         loss = loss + self.params.preservation_ratio * self.optimize(self.preservation_model, batch)
                     self.accelerator.backward(loss)
                     self.optimizer.step()
+
+                    if self.lr_scheduler != None:
+                        self.lr_scheduler.step()
                     self.optimizer.zero_grad()
                 
                 if self.logger != None:
+                    last_lr = self.lr_scheduler.get_last_lr()
                     self.logger.add_scalar('train/loss', loss.detach().item(), self.global_step)
+
+                    if self.lr_scheduler != None:
+                        self.logger.add_scalar('train/lr', last_lr[0], self.global_step)
                     progress_bar.update(1)
                 
                 self.global_step = self.global_step + 1

@@ -35,6 +35,12 @@ class TrainingParameters:
         self.lora_use_rslora = None
         self.lora_pretrained = None
 
+        # lr scheduler
+        self.cyclic_lr_max_lr = None
+        self.cyclic_lr_step_size_up = None
+        self.cyclic_lr_step_size_down = None
+        self.cylic_lr_mode = None 
+
         # low vram
         self.low_vram = None
     
@@ -92,6 +98,20 @@ class TrainingParameters:
             self.preservation_ratio = float(yaml_root['preservation_ratio'])
         else:
             self.use_preservation = False
+        
+        # learning rate scheduler
+        if 'cyclic_lr_max_lr' in yaml_root.keys():
+            self.cyclic_lr_max_lr = float(yaml_root['cyclic_lr_max_lr'])
+            self.cyclic_lr_step_size_up = 2000
+            self.cyclic_lr_step_size_down = 2000
+            self.cylic_lr_mode = 'triangular'
+
+            if 'cyclic_lr_step_size_up' in yaml_root.keys():
+                self.cyclic_lr_step_size_up = int(yaml_root['cyclic_lr_step_size_up'])
+            if 'cyclic_lr_step_size_down' in yaml_root.keys():
+                self.cyclic_lr_step_size_down = int(yaml_root['cyclic_lr_step_size_down'])
+            if 'cylic_lr_mode' in yaml_root.keys():
+                self.cylic_lr_mode = yaml_root['cylic_lr_mode']
         
         # lora training
         if 'lora_rank' in yaml_root.keys():
