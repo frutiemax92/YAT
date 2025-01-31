@@ -151,7 +151,7 @@ class SanaTrainer(Trainer):
     def optimize(self, model, batch):
         self.pipe.vae = self.pipe.vae.cpu()
         self.pipe.text_encoder = self.pipe.text_encoder.cpu()
-        self.pipe.transformer = self.pipe.transformer.to(self.accelerator.device)
+        transformer = self.pipe.transformer.to(self.accelerator.device)
         
         params = self.params
         batch_size = params.batch_size
