@@ -23,6 +23,7 @@ from torch.optim.lr_scheduler import CyclicLR
 import shutil
 import os
 import PIL
+#from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
 class Trainer:
     def __init__(self, params : TrainingParameters):
@@ -145,14 +146,13 @@ class Trainer:
             self.model = self.model.to(dtype=torch.bfloat16)
         params_to_optimizer = self.model.parameters()
 
-        if params.low_vram:
-            self.optimizer = bnb.optim.Adam8bit(params_to_optimizer,
-                                                lr=params.learning_rate,
-                                                weight_decay=params.weight_decay)
-        else:
-            self.optimizer = AdamW(params_to_optimizer,
-                                   lr=params.learning_rate,
-                                   weight_decay=params.weight_decay)
+        self.optimizer = bnb.optim.Adam8bit(params_to_optimizer,
+                                            lr=params.learning_rate,
+                                            weight_decay=params.weight_decay)
+        # else:
+        #     self.optimizer = AdamW(params_to_optimizer,
+        #                            lr=params.learning_rate,
+        #                            weight_decay=params.weight_decay)
         
         self.lr_scheduler = None
         if params.cyclic_lr_max_lr != None:
@@ -174,7 +174,6 @@ class Trainer:
 
     def save_model(self):
         self.model.save_pretrained(f'models/{self.global_step}')
-        self.pipe = self.pipe.to(torch.bfloat16)
 
     def cache_latents_embeddings(self, img, caption, cache_idx):
         img = torch.squeeze(img)
@@ -272,10 +271,9 @@ class Trainer:
                     self.optimizer.zero_grad()
                 
                 if self.logger != None:
-                    last_lr = self.lr_scheduler.get_last_lr()
                     self.logger.add_scalar('train/loss', loss.detach().item(), self.global_step)
-
                     if self.lr_scheduler != None:
+                        last_lr = self.lr_scheduler.get_last_lr()
                         self.logger.add_scalar('train/lr', last_lr[0], self.global_step)
                     progress_bar.update(1)
                 

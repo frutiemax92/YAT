@@ -82,7 +82,7 @@ class TrainingParameters:
             self.cache_size = 1000
         
         if 'weight_decay' in yaml_root.keys():
-            self.weight_decay = yaml_root['weight_decay']
+            self.weight_decay = float(yaml_root['weight_decay'])
         else:
             self.weight_decay = 0.0
         

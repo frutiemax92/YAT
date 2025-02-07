@@ -10,3 +10,4 @@ tensorboard
 boto3
 bitsandbytes
 peft
+timm

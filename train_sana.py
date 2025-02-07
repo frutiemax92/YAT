@@ -14,9 +14,7 @@ from common.trainer import Trainer
 class SanaTrainer(Trainer):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
-        self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path,
-                                                   torch_dtype=torch.float16,
-                                                    variant='fp16')
+        self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path)
         if params.pretrained_model_path != None:
             transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path) 
             self.pipe.transformer = transformer
@@ -147,6 +145,11 @@ class SanaTrainer(Trainer):
             image = self.pipe.image_processor.postprocess(image)
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image[0]), self.global_step)
             idx = idx + 1
+        
+        if self.params.bfloat16:
+            self.pipe.to(device=self.accelerator.device, dtype=torch.bfloat16)
+        else:
+            self.pipe.to(device=self.accelerator.device, dtype=torch.float32)
     
     def optimize(self, model, batch):
         self.pipe.vae = self.pipe.vae.cpu()
