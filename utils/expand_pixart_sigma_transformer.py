@@ -11,25 +11,24 @@ class ResidualConv(nn.Module):
         kernel_size = 8 - 1
         padding = (kernel_size + 1) // 2 - 1
         self.out_net = nn.Sequential(
-            nn.Conv2d(4, 4, kernel_size=kernel_size, padding=padding),
+            nn.Conv2d(8, 8, kernel_size=kernel_size, padding=padding),
             nn.ReLU(),
-            nn.Conv2d(4, 4, kernel_size=kernel_size, padding=padding),
+            nn.Conv2d(8, 8, kernel_size=kernel_size, padding=padding),
             nn.ReLU(),
-            nn.Conv2d(4, 4, kernel_size=kernel_size, padding=padding),
+            nn.Conv2d(8, 8, kernel_size=kernel_size, padding=padding),
         )
-        self.out_alpha = nn.Parameter(torch.tensor(0.1))
         self.cross_attention_dim = cross_attention_dim
 
         for module in self.out_net:
             if hasattr(module, 'weight'):
-                nn.init.dirac_(module.weight)
+                nn.init.xavier_normal_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
     
     def forward(self, x):
         shape = x.shape
-        y = torch.reshape(x, (4, -1, self.cross_attention_dim))
-        z = self.out_alpha * self.out_net(y)
+        y = torch.reshape(x, (shape[0] // 2, 8, -1, self.cross_attention_dim))
+        z = self.out_net(y)
         y = y + z
         return y.reshape(shape)
 
