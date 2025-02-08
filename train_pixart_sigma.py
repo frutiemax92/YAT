@@ -1,7 +1,7 @@
 import argparse
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_256_BIN, ASPECT_RATIO_512_BIN, ASPECT_RATIO_1024_BIN
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_2048_BIN
-from diffusers import PixArtSigmaPipeline, DDPMScheduler
+from diffusers import PixArtSigmaPipeline, DDPMScheduler, PixArtTransformer2DModel
 from diffusers.training_utils import compute_density_for_timestep_sampling
 from torch.optim.adamw import AdamW
 from torch.utils.tensorboard import SummaryWriter
@@ -21,7 +21,7 @@ class PixartSigmaTrainer(Trainer):
         else:
             self.pipe = PixArtSigmaPipeline.from_pretrained(params.pretrained_pipe_path)
         if params.pretrained_model_path != None:
-            transformer = PixArtSigmaPipeline.from_pretrained(params.pretrained_model_path)
+            transformer = PixArtTransformer2DModel.from_pretrained(params.pretrained_model_path)
             self.pipe.transformer = transformer
         self.pipe.transformer.gradient_checkpointing = True
         
