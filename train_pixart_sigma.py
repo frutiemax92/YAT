@@ -2,6 +2,7 @@ import argparse
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_256_BIN, ASPECT_RATIO_512_BIN, ASPECT_RATIO_1024_BIN
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_2048_BIN
 from diffusers import PixArtSigmaPipeline, DDPMScheduler, PixArtTransformer2DModel
+from utils.expand_pixart_sigma_transformer import PixArtTransformer2DModelWithResNet
 from diffusers.training_utils import compute_density_for_timestep_sampling
 from torch.optim.adamw import AdamW
 from torch.utils.tensorboard import SummaryWriter
@@ -11,9 +12,10 @@ from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
 from common.trainer import Trainer
+from transformers import AutoConfig
 
 class PixartSigmaTrainer(Trainer):
-    def __init__(self, params : TrainingParameters):
+    def __init__(self, params : TrainingParameters, config):
         super().__init__(params)
 
         if params.bfloat16:
@@ -21,7 +23,10 @@ class PixartSigmaTrainer(Trainer):
         else:
             self.pipe = PixArtSigmaPipeline.from_pretrained(params.pretrained_pipe_path)
         if params.pretrained_model_path != None:
-            transformer = PixArtTransformer2DModel.from_pretrained(params.pretrained_model_path)
+            if config._class_name != 'PixArtTransformer2DModelWithResNet':
+                transformer = PixArtTransformer2DModel.from_pretrained(params.pretrained_model_path)
+            else:
+                transformer = PixArtTransformer2DModelWithResNet.from_pretrained(params.pretrained_model_path)
             self.pipe.transformer = transformer
         self.pipe.transformer.gradient_checkpointing = True
         
@@ -117,5 +122,7 @@ if __name__ == '__main__':
     params = TrainingParameters()
     params.read_yaml(args.config)
 
-    trainer = PixartSigmaTrainer(params)
+    config = AutoConfig.from_pretrained(params.pretrained_model_path)
+
+    trainer = PixartSigmaTrainer(params, config)
     trainer.run()
