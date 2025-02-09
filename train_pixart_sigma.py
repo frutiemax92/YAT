@@ -108,6 +108,10 @@ class PixartSigmaTrainer(Trainer):
                                 encoder_attention_mask=attention_mask.to(dtype=transformer.dtype)).sample.chunk(2, 1)[0]
         target = noise
         loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
+
+        if hasattr(model, 'get_alphas'):
+            alphas = model.get_alphas()
+            loss = loss + torch.abs(1.0 - torch.mean(torch.tensor(alphas))) * loss
         return loss
         
 if __name__ == '__main__':

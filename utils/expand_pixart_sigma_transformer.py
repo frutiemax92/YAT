@@ -199,6 +199,16 @@ class PixArtTransformer2DModelWithResNet(PixArtTransformer2DModel):
                                                                 block.cross_attention_dim,
                                                                 block.attn2.upcast_attention,
                                                                 self.config.attention_bias)
+    
+    def get_alphas(self):
+        alphas = []
+        transformer_blocks = self.transformer_blocks
+        for block in transformer_blocks:
+            for conv_layer in block.attn1.conv_layers:
+                alphas.append(conv_layer.out_alpha)
+            for conv_layer in block.attn2.conv_layers:
+                alphas.append(conv_layer.out_alpha)
+        return alphas
 
 def expand_pixart_sigma_transformer(transformer):
     state_dict = transformer.state_dict()
