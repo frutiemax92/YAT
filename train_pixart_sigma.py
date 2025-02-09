@@ -45,7 +45,6 @@ class PixartSigmaTrainer(Trainer):
         else:
             self.aspect_ratios = ASPECT_RATIO_2048_BIN
 
-        self.optimizer = AdamW(self.pipe.transformer.parameters(), lr=params.learning_rate)
         if params.bfloat16:
             self.pipe = self.pipe.to(torch.bfloat16)
             self.pipe.transformer = self.pipe.transformer.to(torch.bfloat16)

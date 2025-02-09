@@ -101,7 +101,6 @@ class Trainer:
         self.dataloader_sampler = DataLoader(self.bucket_sampler, batch_size=None, collate_fn=collate_fn)
         self.dataloader_sampler = self.accelerator.prepare_data_loader(self.dataloader_sampler)
 
-
         if self.accelerator.is_main_process:
             self.logger = SummaryWriter()
 
@@ -149,6 +148,7 @@ class Trainer:
         self.optimizer = bnb.optim.Adam8bit(params_to_optimizer,
                                             lr=params.learning_rate,
                                             weight_decay=params.weight_decay)
+        self.optimizer = self.accelerator.prepare(self.optimizer)
         # else:
         #     self.optimizer = AdamW(params_to_optimizer,
         #                            lr=params.learning_rate,
