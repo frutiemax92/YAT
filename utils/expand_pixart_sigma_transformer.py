@@ -19,6 +19,7 @@ class ResidualConv(nn.Module):
         )
         self.cross_attention_dim = cross_attention_dim
         self.out_alpha = torch.nn.Parameter(torch.tensor(0.1))
+        self.out_alpha.requires_grad = True
 
         for module in self.out_net:
             if hasattr(module, 'weight'):
@@ -28,10 +29,10 @@ class ResidualConv(nn.Module):
     
     def forward(self, x):
         shape = x.shape
-        y = torch.reshape(x, (shape[0] // 2, 8, -1, self.cross_attention_dim))
+        y = x.view((shape[0] // 2, 8, -1, self.cross_attention_dim))
         z = self.out_net(y)
         y = y + self.out_alpha * z
-        return y.reshape(shape)
+        return y.view(shape)
 
 class ExpandedAttention(Attention):
     def __init__(self,

@@ -111,7 +111,13 @@ class PixartSigmaTrainer(Trainer):
 
         if hasattr(model, 'get_alphas'):
             alphas = model.get_alphas()
-            loss = loss + torch.abs(1.0 - torch.mean(torch.tensor(alphas))) * loss
+            count = len(alphas)
+            mean_alpha = torch.mean(torch.stack(alphas))
+            loss_alpha = loss_fn(mean_alpha, torch.tensor(1.0, device=mean_alpha.device, dtype=mean_alpha.dtype))
+            loss = loss + loss_alpha
+            if self.logger != None:
+                self.logger.add_scalar('train/mean_alpha', mean_alpha.item(), self.global_step)
+                self.logger.add_scalar('train/loss_alpha', loss_alpha.item(), self.global_step)
         return loss
         
 if __name__ == '__main__':
