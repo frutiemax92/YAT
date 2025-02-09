@@ -87,9 +87,6 @@ class PixartSigmaTrainer(Trainer):
             image = self.pipe.image_processor.postprocess(image, output_type='pt')[0]
             self.logger.add_image(f'validation/{idx}/{prompt}', image, self.global_step)
             idx = idx + 1
-        
-        # save the transformer
-        self.pipe.transformer.save_pretrained(f'{self.global_step}')
     
     def optimize(self, model, batch):
         params = self.params
