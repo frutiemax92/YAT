@@ -18,6 +18,7 @@ class ResidualConv(nn.Module):
             nn.Conv2d(8, 8, kernel_size=kernel_size, padding=padding),
         )
         self.cross_attention_dim = cross_attention_dim
+        self.out_alpha = torch.nn.Parameter(torch.tensor(0.1))
 
         for module in self.out_net:
             if hasattr(module, 'weight'):
@@ -29,7 +30,7 @@ class ResidualConv(nn.Module):
         shape = x.shape
         y = torch.reshape(x, (shape[0] // 2, 8, -1, self.cross_attention_dim))
         z = self.out_net(y)
-        y = y + z
+        y = y + self.out_alpha * z
         return y.reshape(shape)
 
 class ExpandedAttention(Attention):
