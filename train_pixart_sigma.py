@@ -12,7 +12,7 @@ from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
 from common.trainer import Trainer
-from transformers import AutoConfig
+from transformers import AutoConfig, PretrainedConfig
 
 class PixartSigmaTrainer(Trainer):
     def __init__(self, params : TrainingParameters, config):
@@ -121,7 +121,7 @@ if __name__ == '__main__':
     params = TrainingParameters()
     params.read_yaml(args.config)
 
-    config = AutoConfig.from_pretrained(params.pretrained_model_path)
+    config = PretrainedConfig.from_pretrained(params.pretrained_model_path)
 
     trainer = PixartSigmaTrainer(params, config)
     trainer.run()
