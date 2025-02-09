@@ -205,6 +205,7 @@ class Trainer:
         self.initialize()
 
         progress_bar = tqdm.tqdm(total=params.steps, desc='Num Steps')
+        avg_loss = torch.tensor(0, device=self.accelerator.device)
 
         while self.global_step < self.params.steps:
             cache_idx = 0
@@ -263,6 +264,7 @@ class Trainer:
                     loss = self.optimize(self.model, batch)
                     if self.preservation_model != None:
                         loss = loss + self.params.preservation_ratio * self.optimize(self.preservation_model, batch)
+                    avg_loss = avg_loss + loss
                     self.accelerator.backward(loss)
                     self.optimizer.step()
 
@@ -270,14 +272,17 @@ class Trainer:
                         self.lr_scheduler.step()
                     self.optimizer.zero_grad()
                 
-                if self.logger != None:
-                    self.logger.add_scalar('train/loss', loss.detach().item(), self.global_step)
-                    if self.lr_scheduler != None:
-                        last_lr = self.lr_scheduler.get_last_lr()
-                        self.logger.add_scalar('train/lr', last_lr[0], self.global_step)
+                if self.accelerator.sync_gradients:
+                    mean_loss = torch.mean(self.accelerator.gather(avg_loss))
+                    avg_loss = torch.tensor(0, device=self.accelerator.device)
+
+                    if self.logger != None:
+                        self.logger.add_scalar('train/loss', mean_loss.item(), self.global_step)
+                        if self.lr_scheduler != None:
+                            last_lr = self.lr_scheduler.get_last_lr()
+                            self.logger.add_scalar('train/lr', last_lr[0], self.global_step)
                     progress_bar.update(1)
-                
-                self.global_step = self.global_step + 1
+                    self.global_step = self.global_step + 1
             
             # delete the cache
             if self.accelerator.is_main_process:
