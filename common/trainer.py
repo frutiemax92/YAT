@@ -282,7 +282,7 @@ class Trainer:
                             last_lr = self.lr_scheduler.get_last_lr()
                             self.logger.add_scalar('train/lr', last_lr[0], self.global_step)
                     progress_bar.update(1)
-                    self.global_step = self.global_step + 1
+                self.global_step = self.global_step + 1
             
             # delete the cache
             if self.accelerator.is_main_process:
