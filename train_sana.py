@@ -3,7 +3,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_2048_BIN
 from diffusers import SanaTransformer2DModel, FlowMatchEulerDiscreteScheduler
 from diffusers.training_utils import compute_density_for_timestep_sampling
-from diffusers import SanaPipeline
+from diffusers import SanaPipeline, SanaPAGPipeline
 import torch
 import tqdm
 from torchvision.transforms import PILToTensor
@@ -14,7 +14,7 @@ from common.trainer import Trainer
 class SanaTrainer(Trainer):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
-        self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path)
+        self.pipe = SanaPAGPipeline.from_pretrained(params.pretrained_pipe_path, pag_applied_layers="transformer_blocks.8")
         if params.pretrained_model_path != None:
             transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path) 
             self.pipe.transformer = transformer
@@ -123,6 +123,7 @@ class SanaTrainer(Trainer):
                 prompt_attention_mask=prompt_attention_mask,
                 negative_prompt_embeds=negative_prompt_embeds,
                 negative_prompt_attention_mask=negative_prompt_attention_mask,
+                pag_scale=2.0,
                 guidance_scale=5.0,
                 num_inference_steps=20,
                 generator=generator,

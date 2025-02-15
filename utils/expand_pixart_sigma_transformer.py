@@ -211,6 +211,21 @@ class PixArtTransformer2DModelWithResNet(PixArtTransformer2DModel):
                 alphas.append(conv_layer.out_alpha)
         return alphas
 
+    def set_alphas(self, value):
+        transformer_blocks = self.transformer_blocks
+        for block in transformer_blocks:
+            for conv_layer in block.attn1.conv_layers:
+                conv_layer.out_alpha = torch.nn.Parameter(torch.tensor(value))
+            for conv_layer in block.attn2.conv_layers:
+                conv_layer.out_alpha = torch.nn.Parameter(torch.tensor(value))
+    
+    def train_conv_layers(self):
+        for name, param in self.named_parameters():
+            if "conv" not in name:  # Keep only convolution layers trainable
+                param.requires_grad = False
+            else:
+                param.requires_grad = True
+
 def expand_pixart_sigma_transformer(transformer):
     state_dict = transformer.state_dict()
     transformer = PixArtTransformer2DModelWithResNet.from_config(transformer.config)
