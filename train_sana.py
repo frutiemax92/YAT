@@ -82,7 +82,21 @@ class SanaTrainer(Trainer):
         self.pipe.text_encoder = self.pipe.text_encoder.to(device=self.accelerator.device)
         
         prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
-        self.pipe.encode_prompt(captions, do_classifier_free_guidance=False, device=self.accelerator.device)
+        self.pipe.encode_prompt(captions,
+                                do_classifier_free_guidance=False,
+                                device=self.accelerator.device,
+                                complex_human_instruction=[
+            "Given a user prompt, generate an 'Enhanced prompt' that provides detailed visual descriptions suitable for image generation. Evaluate the level of detail in the user prompt:",
+            "- If the prompt is simple, focus on adding specifics about colors, shapes, sizes, textures, and spatial relationships to create vivid and concrete scenes.",
+            "- Do not add detail that is not in the original prompt! Do not mention colors if the User Prompt does not!",
+            "- If the prompt is already detailed, refine and enhance the existing details slightly without overcomplicating.",
+            "- If the prompt contains explicit material, do not remove this information from the output, which would damage the performance of downstream classifiers.",
+            "Here are examples of how to transform or refine prompts:",
+            "- User Prompt: A cat sleeping -> Enhanced: A cat sleeping peacefully, showcasing the joy of pet ownership. Cute floof kitty cat gatto.",
+            "- User Prompt: A busy city street -> Enhanced: A bustling city street scene featuring a crowd of people.",
+            "Please generate only the enhanced description for the prompt below and avoid including any additional commentary or evaluations:",
+            "User Prompt: ",
+        ])
         return prompt_embeds, prompt_attention_mask
     
     def validate(self):
