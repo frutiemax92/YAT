@@ -23,6 +23,8 @@ from torch.optim.lr_scheduler import CyclicLR
 import shutil
 import os
 import PIL
+from diffusers.training_utils import EMAModel
+
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
 class Trainer:
@@ -162,6 +164,8 @@ class Trainer:
                                     step_size_up=params.cyclic_lr_step_size_up,
                                     step_size_down=params.cyclic_lr_step_size_down,
                                     mode=params.cylic_lr_mode)
+        # apply EMA
+        self.ema_model = EMAModel(self.model.parameters(), decay=0.999)
 
     def validate(self):
         raise NotImplemented
@@ -252,8 +256,15 @@ class Trainer:
                 if self.global_step % params.num_steps_per_validation == 0:
                     if self.accelerator.is_main_process:
                         with torch.no_grad():
+                            # Store the original model parameters
+                            self.ema_model.store(self.model.parameters())
+
+                            # Load the EMA parameters into the model
+                            self.ema_model.copy_to(self.model.parameters())
+
                             self.validate()
                             self.save_model()
+                            self.ema_model.restore(self.model.parameters())
 
                 for elem in batch:
                     elem = elem.to(device=self.accelerator.device)
@@ -267,6 +278,7 @@ class Trainer:
                     avg_loss = avg_loss + loss
                     self.accelerator.backward(loss)
                     self.optimizer.step()
+                    self.ema_model.step(self.model.parameters())
 
                     if self.lr_scheduler != None:
                         self.lr_scheduler.step()
@@ -275,6 +287,10 @@ class Trainer:
                 if self.accelerator.sync_gradients:
                     mean_loss = torch.mean(self.accelerator.gather(avg_loss))
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
+
+                    # clip the gradients
+                    params_to_clip = self.model.parameters()
+                    self.accelerator.clip_grad_norm_(params_to_clip, 0.1)
 
                     if self.logger != None:
                         self.logger.add_scalar('train/loss', mean_loss.item(), self.global_step)
