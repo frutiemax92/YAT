@@ -166,6 +166,7 @@ class Trainer:
                                     mode=params.cylic_lr_mode)
         # apply EMA
         self.ema_model = EMAModel(self.model.parameters(), decay=0.999)
+        self.ema_model.to(self.accelerator.device)
 
     def validate(self):
         raise NotImplemented
@@ -254,17 +255,20 @@ class Trainer:
                 if isinstance(batch, list) == False:
                     break
                 if self.global_step % params.num_steps_per_validation == 0:
-                    if self.accelerator.is_main_process:
-                        with torch.no_grad():
-                            # Store the original model parameters
-                            self.ema_model.store(self.model.parameters())
-
-                            # Load the EMA parameters into the model
+                    with torch.no_grad():
+                        # ✅ Run reduction on ALL processes to sync EMA parameters
+                        for param in self.ema_model.shadow_params:
+                            self.accelerator.reduce(param.data, reduction="mean")
+                
+                        # ✅ Ensure store() is called before restore()
+                        if self.accelerator.is_main_process:
+                            self.ema_model.store(self.model.parameters())  # Store original model weights
                             self.ema_model.copy_to(self.model.parameters())
-
+                
                             self.validate()
                             self.save_model()
-                            self.ema_model.restore(self.model.parameters())
+                
+                            self.ema_model.restore(self.model.parameters())  # ✅ Now restore works!
 
                 for elem in batch:
                     elem = elem.to(device=self.accelerator.device)
@@ -287,10 +291,6 @@ class Trainer:
                 if self.accelerator.sync_gradients:
                     mean_loss = torch.mean(self.accelerator.gather(avg_loss))
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
-
-                    # clip the gradients
-                    params_to_clip = self.model.parameters()
-                    self.accelerator.clip_grad_norm_(params_to_clip, 0.1)
 
                     if self.logger != None:
                         self.logger.add_scalar('train/loss', mean_loss.item(), self.global_step)
