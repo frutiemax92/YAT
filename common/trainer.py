@@ -147,7 +147,7 @@ class Trainer:
             self.model = self.model.to(dtype=torch.bfloat16)
         params_to_optimizer = self.model.parameters()
 
-        self.optimizer = bnb.optim.Adam8bit(params_to_optimizer,
+        self.optimizer = bnb.optim.AdamW8bit(params_to_optimizer,
                                             lr=params.learning_rate,
                                             weight_decay=params.weight_decay)
         self.optimizer = self.accelerator.prepare(self.optimizer)
@@ -165,8 +165,10 @@ class Trainer:
                                     step_size_down=params.cyclic_lr_step_size_down,
                                     mode=params.cylic_lr_mode)
         # apply EMA
-        self.ema_model = EMAModel(self.model.parameters(), decay=0.999)
-        self.ema_model.to(self.accelerator.device)
+        if self.params.use_ema:
+            self.ema_model = EMAModel(self.model.parameters(), decay=0.999)
+            self.ema_model.to(self.accelerator.device)
+        self.ema_model = None
 
     def validate(self):
         raise NotImplemented
@@ -257,18 +259,21 @@ class Trainer:
                 if self.global_step % params.num_steps_per_validation == 0:
                     with torch.no_grad():
                         # ✅ Run reduction on ALL processes to sync EMA parameters
-                        for param in self.ema_model.shadow_params:
-                            self.accelerator.reduce(param.data, reduction="mean")
+                        if self.ema_model != None:
+                            for param in self.ema_model.shadow_params:
+                                self.accelerator.reduce(param.data, reduction="mean")
                 
                         # ✅ Ensure store() is called before restore()
                         if self.accelerator.is_main_process:
-                            self.ema_model.store(self.model.parameters())  # Store original model weights
-                            self.ema_model.copy_to(self.model.parameters())
+                            if self.ema_model != None:
+                                self.ema_model.store(self.model.parameters())  # Store original model weights
+                                self.ema_model.copy_to(self.model.parameters())
                 
                             self.validate()
                             self.save_model()
                 
-                            self.ema_model.restore(self.model.parameters())  # ✅ Now restore works!
+                            if self.ema_model != None:
+                                self.ema_model.restore(self.model.parameters())  # ✅ Now restore works!
 
                 for elem in batch:
                     elem = elem.to(device=self.accelerator.device)
@@ -282,7 +287,9 @@ class Trainer:
                     avg_loss = avg_loss + loss
                     self.accelerator.backward(loss)
                     self.optimizer.step()
-                    self.ema_model.step(self.model.parameters())
+
+                    if self.ema_model != None:
+                        self.ema_model.step(self.model.parameters())
 
                     if self.lr_scheduler != None:
                         self.lr_scheduler.step()

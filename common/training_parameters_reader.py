@@ -99,6 +99,10 @@ class TrainingParameters:
         else:
             self.use_preservation = False
         
+        self.use_ema = False
+        if 'use_ema' in yaml_root.keys():
+            self.use_ema = True
+        
         # learning rate scheduler
         if 'cyclic_lr_max_lr' in yaml_root.keys():
             self.cyclic_lr_max_lr = float(yaml_root['cyclic_lr_max_lr'])

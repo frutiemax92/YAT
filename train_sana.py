@@ -41,20 +41,21 @@ class SanaTrainer(Trainer):
     
     def initialize(self):
         super().initialize()
-        self.pipe = self.pipe.to(self.accelerator.device)
+        #self.pipe = self.pipe.to(self.accelerator.device)
         self.pipe.transformer = self.model
         text_encoder = self.pipe.text_encoder
         vae = self.pipe.vae
         transformer = self.pipe.transformer
         
-        transformer = transformer.to(self.accelerator.device)
-        vae = vae.to(self.accelerator.device)
-        text_encoder = text_encoder.to(self.accelerator.device)
         if self.params.low_vram:
             if self.accelerator.is_main_process:
                 vae = vae.to(device=self.accelerator.device)
                 text_encoder = text_encoder.to(device=self.accelerator.device)
                 transformer = transformer.cpu()
+        else:
+            transformer = transformer.to(self.accelerator.device)
+            vae = vae.to(self.accelerator.device)
+            text_encoder = text_encoder.to(self.accelerator.device)
     
     def extract_latents(self, images):
         image_processor = self.pipe.image_processor
@@ -108,29 +109,34 @@ class SanaTrainer(Trainer):
         scheduler = self.pipe.scheduler
         if params.low_vram:
             vae = vae.cpu()
-            text_encoder = self.pipe.text_encoder
-            text_encoder = text_encoder.cpu()
+            transformer = transformer.cpu()
             self.pipe.vae = None
+            self.pipe.transformer = None
             torch.cuda.empty_cache()
 
         # convert to float16 as inference with bfloat16 is unstable
-        self.pipe.to(device=self.accelerator.device, dtype=torch.float16)
+        self.pipe.to(dtype=torch.float16, device=self.accelerator.device)
 
         pil_to_tensor = PILToTensor()
         idx = 0
         generator=torch.Generator(device="cuda").manual_seed(42)
         latents = []
-        for prompt in tqdm.tqdm(params.validation_prompts, desc='Generating validation latents'):
+        embeds = []
+        for prompt in tqdm.tqdm(params.validation_prompts, desc='Generating validation embeddings'):
             if params.low_vram:
                 text_encoder = text_encoder.to(device=self.accelerator.device)
                 self.pipe.text_encoder = text_encoder
                 prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
                     self.pipe.encode_prompt(prompt)
-                text_encoder = text_encoder.cpu()
-                self.pipe.text_encoder = None
-                self.pipe = self.pipe.to(self.accelerator.device)
-                torch.cuda.empty_cache()
+                embeds.append((prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask))
+        
+        text_encoder = text_encoder.cpu()
+        self.pipe.text_encoder = None
+        self.pipe.transformer = transformer
+        transformer = transformer.to(self.accelerator.device)
 
+        for embed in tqdm.tqdm(embeds, desc='Generating validation latents'):
+            prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = embed
             latent = self.pipe(
                 negative_prompt=None,
                 prompt_embeds=prompt_embeds,
@@ -145,13 +151,12 @@ class SanaTrainer(Trainer):
             )[0]
             latents.append(latent)
 
+        transformer = transformer.cpu()
+        self.pipe.transformer = None
+
         self.pipe.vae = vae
-        self.pipe.text_encoder = text_encoder
-        if self.params.low_vram:
-            transformer = transformer.cpu()
-            vae = vae.to(self.accelerator.device)
-        
-        vae = self.pipe.vae
+        vae = vae.to(self.accelerator.device)
+
         idx = 0
         for latent in tqdm.tqdm(latents, desc='Decoding validation latents'):
             prompt = params.validation_prompts[idx]
@@ -161,14 +166,16 @@ class SanaTrainer(Trainer):
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image[0]), self.global_step)
             idx = idx + 1
         
-        if self.params.bfloat16:
-            self.pipe.to(device=self.accelerator.device, dtype=torch.bfloat16)
-        else:
-            self.pipe.to(device=self.accelerator.device, dtype=torch.float32)
+        self.pipe.transformer = transformer
+        self.pipe.vae = vae
+        self.pipe.text_encoder = text_encoder
+        self.pipe.to(dtype=torch.bfloat16)
     
     def optimize(self, model, batch):
-        self.pipe.vae = self.pipe.vae.cpu()
-        self.pipe.text_encoder = self.pipe.text_encoder.cpu()
+        if self.pipe.vae.device != 'cpu':
+            self.pipe.vae = self.pipe.vae.cpu()
+            self.pipe.text_encoder = self.pipe.text_encoder.cpu()
+            torch.cuda.empty_cache()
         transformer = self.pipe.transformer.to(self.accelerator.device)
         
         params = self.params
@@ -184,6 +191,12 @@ class SanaTrainer(Trainer):
         noisy_model_input = self.scheduler.scale_noise(latents.to(self.accelerator.device), timesteps, noise)
 
         transformer = model
+
+        if self.params.batch_size == 1:
+            noisy_model_input = noisy_model_input.unsqueeze(0)
+            embeddings = embeddings.unsqueeze(0)
+            attention_mask = attention_mask.unsqueeze(0)
+
         noise_pred = transformer(noisy_model_input.to(dtype=self.pipe.vae.dtype),
                                 encoder_hidden_states=embeddings.to(dtype=self.pipe.vae.dtype),
                                 timestep=timesteps.to(dtype=self.pipe.vae.dtype),
