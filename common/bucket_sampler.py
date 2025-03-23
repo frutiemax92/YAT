@@ -13,6 +13,39 @@ def flush():
     gc.collect()
     torch.cuda.empty_cache()
 
+class RoundRobinMix(torch.utils.data.IterableDataset):
+    def __init__(self, datasets, seed=0):
+        self.datasets = datasets
+        self.num_datasets = len(datasets)
+        self.curr_dataset = 0
+        self.iterators = [iter(dataset) for dataset in self.datasets]
+        self.buffer_size = 100
+        self.buffer = []
+        random.seed(seed)
+
+    def __iter__(self):
+        while True:
+            for i in tqdm(range(self.buffer_size), desc='Downloading images'):
+                try:
+                    item = next(self.iterators[self.curr_dataset])
+                except StopIteration:
+                    self.iterators[self.curr_dataset] = iter(self.datasets[self.curr_dataset])
+                    item = next(self.iterators[self.curr_dataset])
+                self.buffer.append(item)
+            self.curr_dataset = self.curr_dataset + 1
+            if self.curr_dataset >= self.num_datasets:
+                random.shuffle(self.buffer)
+                for item in self.buffer:
+                    yield item
+                self.buffer.clear()
+                self.curr_dataset = 0
+
+            # try:
+            #     yield next(self.iterators[self.curr_dataset])
+            # except:
+            #     self.iterators[self.curr_dataset] = iter(self.datasets[self.curr_dataset])
+            # self.curr_dataset = (self.curr_dataset + 1) % self.num_datasets
+
 class BucketDataset(IterableDataset):
     def __init__(self,
                  dataset,

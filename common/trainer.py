@@ -4,7 +4,7 @@ from common.cloudflare import get_secured_urls
 from accelerate import Accelerator
 import webdataset as wds
 from torch.utils.data import DataLoader
-from common.bucket_sampler import BucketDataset
+from common.bucket_sampler import BucketDataset, RoundRobinMix
 from common.bucket_sampler_cache import DataExtractor, BucketDatasetWithCache
 from torch.utils.tensorboard import SummaryWriter
 from webdataset.utils import pytorch_worker_info
@@ -46,12 +46,9 @@ class Trainer:
         def node_no_split(src):
             return src
 
-        datasets = [wds.WebDataset(url, shardshuffle=1000, detshuffle=True, seed=0,
-                handler=wds.ignore_and_continue,
-                nodesplitter=node_no_split, empty_check=False).\
-                    decode("pil", handler=wds.ignore_and_continue).\
-                    to_tuple(["jpg", 'jpeg'], "txt", handler=wds.ignore_and_continue) for url in urls]
-        mix = wds.RandomMix(datasets, params.url_probs)
+        datasets = [wds.WebDataset(url, shardshuffle=False, handler=wds.ignore_and_continue, nodesplitter=node_no_split).\
+                    decode('pil').to_tuple(["jpg", 'jpeg'], "txt", handler=wds.ignore_and_continue) for url in urls]
+        mix = RoundRobinMix(datasets, params.dataset_seed)
 
         self.mix = mix
         self.preservation_model = None
