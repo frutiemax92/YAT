@@ -1,10 +1,53 @@
 from diffusers import SanaTransformer2DModel
 from diffusers.models.attention_processor import Attention, AttnProcessor
+from typing import Any, Dict, Optional, Tuple, Union
+from diffusers.models.embeddings import PatchEmbed, PixArtAlphaTextProjection
+from diffusers.models.transformers.sana_transformer import SanaCombinedTimestepGuidanceEmbeddings
+from diffusers.models.normalization import AdaLayerNormSingle, RMSNorm
 
-def create_sana_transformer() -> SanaTransformer2DModel:
-    config = SanaTransformer2DModel.load_config('Efficient-Large-Model/Sana_600M_1024px_diffusers', subfolder='transformer')
-    transformer = SanaTransformer2DModel.from_config(config)
+class SanaTransformerFullAttentionModel(SanaTransformer2DModel):
+    def __init__(self,
+        in_channels: int = 32,
+        out_channels: Optional[int] = 32,
+        num_attention_heads: int = 70,
+        attention_head_dim: int = 32,
+        num_layers: int = 20,
+        num_cross_attention_heads: Optional[int] = 20,
+        cross_attention_head_dim: Optional[int] = 112,
+        cross_attention_dim: Optional[int] = 2240,
+        caption_channels: int = 2304,
+        mlp_ratio: float = 2.5,
+        dropout: float = 0.0,
+        attention_bias: bool = False,
+        sample_size: int = 32,
+        patch_size: int = 1,
+        norm_elementwise_affine: bool = False,
+        norm_eps: float = 1e-6,
+        interpolation_scale: Optional[int] = None,
+        guidance_embeds: bool = False,
+        qk_norm: Optional[str] = None):
+        super().__init__(in_channels,
+                         out_channels,
+                         num_attention_heads,
+                         attention_head_dim,
+                         num_layers,
+                         num_cross_attention_heads,
+                         cross_attention_head_dim,
+                         cross_attention_dim,
+                         caption_channels,
+                         mlp_ratio,
+                         dropout,
+                         attention_bias,
+                         sample_size,
+                         patch_size,
+                         norm_elementwise_affine,
+                         norm_eps,
+                         interpolation_scale,
+                         guidance_embeds,
+                         qk_norm)
+        patch_sana_transformer(self)
 
+def patch_sana_transformer(transformer : SanaTransformer2DModel):
     dim = transformer.config.cross_attention_dim
     num_attention_heads = transformer.config.num_attention_heads
     attention_head_dim = transformer.config.attention_head_dim
@@ -43,4 +86,9 @@ def create_sana_transformer() -> SanaTransformer2DModel:
         )
     total_params = sum(p.numel() for p in transformer.parameters())
     print(f"Total parameters in U-Net: {total_params}")
+
+def create_sana_transformer() -> SanaTransformer2DModel:
+    config = SanaTransformer2DModel.load_config('Efficient-Large-Model/Sana_600M_1024px_diffusers', subfolder='transformer')
+    transformer = SanaTransformer2DModel.from_config(config)
+    patch_sana_transformer(transformer)
     return transformer
