@@ -1,7 +1,10 @@
 from diffusers import SanaTransformer2DModel
 from diffusers.models.attention_processor import Attention, AttnProcessor
 
-def patch_sana_transformer(transformer : SanaTransformer2DModel):
+def create_sana_transformer() -> SanaTransformer2DModel:
+    config = SanaTransformer2DModel.load_config('Efficient-Large-Model/Sana_600M_1024px_diffusers', subfolder='transformer')
+    transformer = SanaTransformer2DModel.from_config(config)
+
     dim = transformer.config.cross_attention_dim
     num_attention_heads = transformer.config.num_attention_heads
     attention_head_dim = transformer.config.attention_head_dim
@@ -38,3 +41,6 @@ def patch_sana_transformer(transformer : SanaTransformer2DModel):
             out_bias=True,
             processor=AttnProcessor(),
         )
+    total_params = sum(p.numel() for p in transformer.parameters())
+    print(f"Total parameters in U-Net: {total_params}")
+    return transformer
