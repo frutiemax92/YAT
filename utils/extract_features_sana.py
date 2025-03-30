@@ -68,7 +68,7 @@ def cache_latents_embeddings(img, caption, cache_idx, aspect_ratios, process_ind
     # save on the disk
     embedding = [emb.cpu() for emb in embedding]
     to_save = (closest_ratio, latent.cpu(), embedding)
-    torch.save(to_save, f'cache/{process_index}/{cache_idx}.npy')
+    torch.save(to_save, f'cache/{cache_idx}.npy')
 
 def extract_latents(images, pipe : SanaPAGPipeline, accelerator):
     image_processor = pipe.image_processor
@@ -125,7 +125,7 @@ if __name__ == '__main__':
     def node_no_split(src):
         return src
     accelerator = Accelerator()
-    dataset = wds.WebDataset(urls, shardshuffle=False, handler=wds.ignore_and_continue, nodesplitter=wds.split_by_node, workersplitter=wds.split_by_worker).\
+    dataset = wds.WebDataset(urls, shardshuffle=False, handler=wds.ignore_and_continue, nodesplitter=node_no_split, workersplitter=wds.split_by_worker).\
                 decode('pil').to_tuple(["jpg", 'jpeg'], "txt", handler=wds.ignore_and_continue)
 
     device = accelerator.device
@@ -148,15 +148,17 @@ if __name__ == '__main__':
 
 
     os.makedirs(f'cache/{accelerator.process_index}', exist_ok=True)
+    dataset_fetcher = DatasetFetcher(dataset, accelerator.process_index, accelerator.num_processes)
     
     j = 0
     k = accelerator.process_index
-    for img, caption in tqdm.tqdm(dataset):
+    for img, caption in tqdm.tqdm(dataset_fetcher):
+        img.save(f'{k}.jpg')
         img = pipe.image_processor.pil_to_numpy(img)
         img = torch.tensor(img).to(dtype=pipe.dtype)
         img = torch.moveaxis(img, -1, 1)
     
         with torch.no_grad():
-            cache_latents_embeddings(img, caption, j, aspect_ratios, accelerator.process_index)
+            cache_latents_embeddings(img, caption, k, aspect_ratios, accelerator.process_index)
         j = j + 1
         k = k + accelerator.num_processes
