@@ -14,13 +14,14 @@ def flush():
     torch.cuda.empty_cache()
 
 class RoundRobinMix(torch.utils.data.IterableDataset):
-    def __init__(self, datasets, seed=0):
+    def __init__(self, datasets, seed=0, accelerator=None):
         self.datasets = datasets
         self.num_datasets = len(datasets)
         self.curr_dataset = 0
         self.iterators = [iter(dataset) for dataset in self.datasets]
         self.buffer_size = 100
         self.buffer = []
+        self.accelerator = accelerator
         random.seed(seed)
 
     def __iter__(self):
@@ -35,6 +36,8 @@ class RoundRobinMix(torch.utils.data.IterableDataset):
             self.curr_dataset = self.curr_dataset + 1
             if self.curr_dataset >= self.num_datasets:
                 random.shuffle(self.buffer)
+                if self.accelerator != None:
+                    print(f'process_index = {self.accelerator.process_index}')
                 for item in self.buffer:
                     yield item
                 self.buffer.clear()
