@@ -24,6 +24,7 @@ import shutil
 import os
 import PIL
 from diffusers.training_utils import EMAModel
+from common.cache import CacheFeaturesCompute
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
@@ -52,6 +53,7 @@ class Trainer:
 
         self.mix = mix
         self.preservation_model = None
+        self.cache_calculator = CacheFeaturesCompute()
 
     def extract_latents(self, images):
         raise NotImplemented
@@ -212,41 +214,7 @@ class Trainer:
         avg_loss = torch.tensor(0, device=self.accelerator.device)
 
         while self.global_step < self.params.steps:
-            cache_idx = 0
-
-            # swap the model to the cpu while caching
-            if self.params.low_vram:
-                self.model = self.model.cpu()
-
-            if self.accelerator.is_main_process:
-                it = range(self.params.cache_size * self.accelerator.num_processes)
-            else:
-                it = range(self.accelerator.process_index,
-                                                self.params.cache_size * self.accelerator.num_processes,
-                                                self.accelerator.num_processes)
-            for cache_idx in tqdm.tqdm(it, desc='Extracting latents and captions'):
-                if self.accelerator.is_main_process:
-                    img, caption = next(self.data_extractor_iter)
-
-                    if cache_idx % self.accelerator.num_processes != 0:
-                        torch.save(img[0], f'cache/{cache_idx}.mpy')
-                        with open(f'cache/{cache_idx}.txt', 'w') as f:
-                            f.write(caption[0])
-                    else:
-                        self.cache_latents_embeddings(img, caption[0], cache_idx)
-                else:
-                    # try to read the image and caption when they're available
-                    while True:
-                        try:
-                            img = torch.load(f'cache/{cache_idx}.mpy')
-                            with open(f'cache/{cache_idx}.txt') as f:
-                                caption = f.read()
-                            break
-                        except:
-                            continue
-                
-                    # start with the caching
-                    self.cache_latents_embeddings(img, caption, cache_idx)
+            self.cache_calculator.run(self)
                 
             # then go through the cache items
             for batch in self.dataloader_sampler:
