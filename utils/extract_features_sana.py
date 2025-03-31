@@ -125,8 +125,14 @@ if __name__ == '__main__':
     def node_no_split(src):
         return src
     accelerator = Accelerator()
-    dataset = wds.WebDataset(urls, shardshuffle=False, handler=wds.ignore_and_continue, nodesplitter=node_no_split, workersplitter=wds.split_by_worker).\
-                decode('pil').to_tuple(["jpg", 'jpeg'], "txt", handler=wds.ignore_and_continue)
+    k = accelerator.process_index
+
+    def custom_handler(exn):
+        k = k + accelerator.num_processes
+        return True
+
+    dataset = wds.WebDataset(urls, shardshuffle=False, handler=custom_handler, nodesplitter=node_no_split, workersplitter=wds.split_by_worker).\
+                decode('pil').to_tuple(["jpg", 'jpeg'], "txt", handler=custom_handler)
 
     device = accelerator.device
     num_processes = accelerator.num_processes
@@ -151,7 +157,7 @@ if __name__ == '__main__':
     dataset_fetcher = DatasetFetcher(dataset, accelerator.process_index, accelerator.num_processes)
     
     j = 0
-    k = accelerator.process_index
+    
     for img, caption in tqdm.tqdm(dataset_fetcher):
         img = pipe.image_processor.pil_to_numpy(img)
         img = torch.tensor(img).to(dtype=pipe.dtype)
