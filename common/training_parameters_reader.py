@@ -136,6 +136,7 @@ class TrainingParameters:
             self.lora_use_dora = 'lora_use_dora' in yaml_root.keys()
         
         self.low_vram = 'low_vram' in yaml_root.keys()
+        self.use_calculated_features = 'use_calculated_features' in yaml_root.keys()
 
 if __name__ == '__main__':
     params = TrainingParameters()

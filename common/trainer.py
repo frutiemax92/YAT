@@ -5,7 +5,7 @@ from accelerate import Accelerator
 import webdataset as wds
 from torch.utils.data import DataLoader
 from common.bucket_sampler import BucketDataset, RoundRobinMix
-from common.bucket_sampler_cache import DataExtractor, BucketDatasetWithCache
+from common.bucket_sampler_cache import DataExtractor, DataExtractorFeatures, BucketDatasetWithCache
 from torch.utils.tensorboard import SummaryWriter
 from webdataset.utils import pytorch_worker_info
 from torch.optim.adamw import AdamW
@@ -24,7 +24,8 @@ import shutil
 import os
 import PIL
 from diffusers.training_utils import EMAModel
-from common.cache import CacheFeaturesCompute
+from common.cache import CacheFeaturesCompute, CacheLoadFeatures
+import io
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
@@ -47,13 +48,24 @@ class Trainer:
         def node_no_split(src):
             return src
 
-        datasets = [wds.WebDataset(url, shardshuffle=False, handler=wds.ignore_and_continue, nodesplitter=node_no_split).\
-                    decode('pil').to_tuple(["jpg", 'jpeg'], "txt", handler=wds.ignore_and_continue) for url in urls]
+        if params.use_calculated_features == False:
+            datasets = [wds.WebDataset(url, shardshuffle=False, handler=wds.ignore_and_continue, nodesplitter=node_no_split).\
+                        decode('pil').to_tuple(["jpg", 'jpeg'], "txt", handler=wds.ignore_and_continue) for url in urls]
+            self.cache_calculator = CacheFeaturesCompute()
+        else:
+            def custom_decoder(key, value):
+                if key.endswith('.npy') or key.endswith('.npz'):
+                    buffer = io.BytesIO(value)
+                    return torch.load(buffer)
+                return value
+            datasets = [wds.WebDataset(url, shardshuffle=False, handler=wds.ignore_and_continue, nodesplitter=node_no_split).\
+                        decode(custom_decoder).to_tuple('npy') for url in urls]
+            self.cache_calculator = CacheLoadFeatures()
         mix = RoundRobinMix(datasets, params.dataset_seed)
 
         self.mix = mix
         self.preservation_model = None
-        self.cache_calculator = CacheFeaturesCompute()
+        
 
     def extract_latents(self, images):
         raise NotImplemented
@@ -77,12 +89,21 @@ class Trainer:
     def initialize(self):
         params = self.params
 
-        self.data_extractor = DataExtractor(self.mix,
-                                            self.params.cache_size,
-                                            self.pipe,
-                                            torch.cuda.device_count(),
-                                            self.params.dataset_seed,
-                                            self.accelerator.process_index)
+        if params.use_calculated_features == False:
+            self.data_extractor = DataExtractor(self.mix,
+                                                self.params.cache_size,
+                                                self.pipe,
+                                                torch.cuda.device_count(),
+                                                self.params.dataset_seed,
+                                                self.accelerator.process_index)
+            
+        else:
+            self.data_extractor = DataExtractorFeatures(self.mix,
+                                    self.params.cache_size,
+                                    self.pipe,
+                                    torch.cuda.device_count(),
+                                    self.params.dataset_seed,
+                                    self.accelerator.process_index)
         self.dataloader_extractor = DataLoader(self.data_extractor, batch_size=1)
         # self.dataloader_extractor = prepare_data_loader(self.dataloader_extractor,
         #                                                 split_batches=True,

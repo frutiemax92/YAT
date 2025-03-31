@@ -44,6 +44,31 @@ class DataExtractor(IterableDataset):
                 img = torch.moveaxis(img, -1, 1)
                 yield img, caption
 
+class DataExtractorFeatures(IterableDataset):
+    def __init__(self,
+                 dataset,
+                 cache_size,
+                 pipe,
+                 num_processes,
+                 seed,
+                 process_index):
+        super().__init__()
+        self.batch_size = 1
+        self.dataset = dataset
+        self.cache_size = cache_size
+        self.dataset_iterator = iter(dataset)
+        self.pipe = pipe
+        self.num_processes = num_processes
+        self.seed = seed
+        self.process_index = process_index
+
+    def __iter__(self):
+        tqdm.write(f'Process Index = {self.process_index}')
+        while True:
+            random.seed(self.seed)
+            for item in self.dataset:
+                yield item
+
 class BucketDatasetWithCache(IterableDataset):
     def __init__(self,
                  batch_size,
