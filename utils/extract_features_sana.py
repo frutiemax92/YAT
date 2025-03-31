@@ -147,13 +147,12 @@ if __name__ == '__main__':
         aspect_ratios = ASPECT_RATIO_2048_BIN
 
 
-    os.makedirs(f'cache/{accelerator.process_index}', exist_ok=True)
+    os.makedirs(f'cache', exist_ok=True)
     dataset_fetcher = DatasetFetcher(dataset, accelerator.process_index, accelerator.num_processes)
     
     j = 0
     k = accelerator.process_index
     for img, caption in tqdm.tqdm(dataset_fetcher):
-        img.save(f'{k}.jpg')
         img = pipe.image_processor.pil_to_numpy(img)
         img = torch.tensor(img).to(dtype=pipe.dtype)
         img = torch.moveaxis(img, -1, 1)
