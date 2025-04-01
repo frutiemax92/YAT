@@ -20,6 +20,24 @@ import gc
 from common.bucket_sampler_cache import DataExtractor
 import itertools
 
+class ShardedIterableDataset:
+    def __init__(self, dataset, rank, world_size):
+        self.dataset = dataset
+        self.rank = rank
+        self.world_size = world_size
+    
+    def __iter__(self):
+        dataset_iter = iter(self.dataset)
+        for i, sample in enumerate(dataset_iter):
+            if i % self.world_size != self.rank:
+                continue  # Ensure each process only processes its assigned samples
+            
+            try:
+                yield sample
+            except Exception as e:
+                print(f"[Process {self.rank}] Skipping sample {i} due to error: {e}")
+                continue  # Skip bad samples and move on
+
 class DatasetFetcher(torch.utils.data.IterableDataset):
     def __init__(self, dataset, process_index, num_processes):
         self.num_processes = num_processes
@@ -155,7 +173,7 @@ if __name__ == '__main__':
         return itertools.islice(dataset, rank, None, world_size)
 
     # Shard dataset based on process index
-    sharded_dataset = shard_dataset(dataset_fetcher, accelerator.process_index, accelerator.num_processes)
+    sharded_dataset = ShardedIterableDataset(dataset_fetcher, accelerator.process_index, accelerator.num_processes)
 
     k = 0
     j = accelerator.process_index
