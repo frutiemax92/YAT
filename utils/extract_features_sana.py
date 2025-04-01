@@ -18,6 +18,7 @@ from common.bucket_sampler import RoundRobinMix
 from torch.utils.data import DataLoader
 import gc
 from common.bucket_sampler_cache import DataExtractor
+import itertools
 
 class DatasetFetcher(torch.utils.data.IterableDataset):
     def __init__(self, dataset, process_index, num_processes):
@@ -28,9 +29,7 @@ class DatasetFetcher(torch.utils.data.IterableDataset):
     def __iter__(self):
         idx = 0
         for img, caption in dataset:
-            if idx == self.process_index:
-                yield img, caption
-            idx = (idx + 1) % self.num_processes
+            yield img, caption
 
 def find_closest_ratio(ratio, aspect_ratios):
     # find the closest ratio from the aspect ratios table
@@ -149,15 +148,23 @@ if __name__ == '__main__':
 
     os.makedirs(f'cache', exist_ok=True)
     dataset_fetcher = DatasetFetcher(dataset, accelerator.process_index, accelerator.num_processes)
+
+    device = accelerator.device
     
-    j = 0
-    
-    for img, caption in tqdm.tqdm(dataset_fetcher):
+    def shard_dataset(dataset, rank, world_size):
+        return itertools.islice(dataset, rank, None, world_size)
+
+    # Shard dataset based on process index
+    sharded_dataset = shard_dataset(dataset_fetcher, accelerator.process_index, accelerator.num_processes)
+
+    k = 0
+    j = accelerator.process_index
+    for img, caption in tqdm.tqdm(sharded_dataset):
         img = pipe.image_processor.pil_to_numpy(img)
-        img = torch.tensor(img).to(dtype=pipe.dtype)
+        img = torch.tensor(img, device=device, dtype=pipe.dtype)
         img = torch.moveaxis(img, -1, 1)
-    
+
         with torch.no_grad():
             cache_latents_embeddings(img, caption, k, aspect_ratios, accelerator.process_index)
-        j = j + 1
-        k = k + accelerator.num_processes
+        j = j + accelerator.num_processes
+        k = k + 1
