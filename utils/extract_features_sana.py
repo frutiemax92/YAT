@@ -165,6 +165,6 @@ if __name__ == '__main__':
         img = torch.moveaxis(img, -1, 1)
 
         with torch.no_grad():
-            cache_latents_embeddings(img, caption, k, aspect_ratios, accelerator.process_index)
+            cache_latents_embeddings(img, caption, j, aspect_ratios, accelerator.process_index)
         j = j + accelerator.num_processes
         k = k + 1
