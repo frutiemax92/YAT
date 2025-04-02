@@ -87,6 +87,26 @@ def patch_sana_transformer(transformer : SanaTransformer2DModel):
     total_params = sum(p.numel() for p in transformer.parameters())
     print(f"Total parameters in U-Net: {total_params}")
 
+def change_sample_size(transformer : SanaTransformerFullAttentionModel):
+    # 1. Patch Embedding
+    transformer.config.sample_size = 32
+    sample_size = transformer.config.sample_size
+    patch_size = transformer.config.patch_size
+    in_channels = transformer.config.in_channels
+    num_attention_heads = transformer.config.num_attention_heads
+    attention_head_dim = transformer.config.attention_head_dim
+    inner_dim = num_attention_heads * attention_head_dim
+    interpolation_scale = transformer.config.interpolation_scale
+    transformer.patch_embed = PatchEmbed(
+        height=sample_size,
+        width=sample_size,
+        patch_size=patch_size,
+        in_channels=in_channels,
+        embed_dim=inner_dim,
+        interpolation_scale=interpolation_scale,
+        pos_embed_type="sincos" if interpolation_scale is not None else None,
+    )
+
 def create_sana_transformer() -> SanaTransformer2DModel:
     config = SanaTransformer2DModel.load_config('Efficient-Large-Model/Sana_600M_1024px_diffusers', subfolder='transformer')
     transformer = SanaTransformer2DModel.from_config(config)
