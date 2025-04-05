@@ -14,6 +14,8 @@ from common.training_parameters_reader import TrainingParameters
 from common.trainer import Trainer
 from diffusers import BitsAndBytesConfig
 from transformers import T5EncoderModel
+from utils.compress_caption import compress_caption
+import gc
 
 class SD35Trainer(Trainer):
     def __init__(self, params : TrainingParameters):
@@ -22,12 +24,16 @@ class SD35Trainer(Trainer):
         if params.bfloat16:
             if self.params.low_vram:
                 # put the T5 model as 8 bits
-                config_8bit = BitsAndBytesConfig(load_in_8bit=True)
+                config_8bit = BitsAndBytesConfig(load_in_8bit=True, llm_int8_enable_fp32_cpu_offload=True)
                 text_encoder_3 = T5EncoderModel.from_pretrained(params.pretrained_pipe_path,
                                                                 subfolder='text_encoder_3',
-                                                                quantization_config=config_8bit)
+                                                                torch_dtype=torch.bfloat16)
+                transformer = SD3Transformer2DModel.from_pretrained(params.pretrained_pipe_path,
+                                                                    subfolder='transformer',
+                                                                    torch_dtype=torch.bfloat16)
                 self.pipe = StableDiffusion3Pipeline.from_pretrained(params.pretrained_pipe_path,
                                                                      text_encoder_3=text_encoder_3,
+                                                                     transformer=transformer,
                                                                      torch_dtype=torch.bfloat16)
             else:
                 self.pipe = StableDiffusion3Pipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16)
@@ -36,13 +42,10 @@ class SD35Trainer(Trainer):
         if params.pretrained_model_path != None:
             transformer = SD3Transformer2DModel.from_pretrained(params.pretrained_model_path)
             self.pipe.transformer = transformer
-        self.pipe.enable_model_cpu_offload()
+        #self.pipe.enable_model_cpu_offload()
 
         # required for lower vram consumption
-        self.pipe.transformer.gradient_checkpointing = True
-        self.pipe.text_encoder.gradient_checkpointing = True
-        self.pipe.text_encoder_2.gradient_checkpointing = True
-        self.pipe.text_encoder_3.gradient_checkpointing = True
+        self.pipe.transformer.enable_gradient_checkpointing()
         
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
         self.pipe.vae.train(False)
@@ -57,73 +60,119 @@ class SD35Trainer(Trainer):
     
     def initialize(self):
         super().initialize()
-        if self.params.low_vram != True:
-            self.pipe = self.pipe.to(self.accelerator.device)
     
     def extract_latents(self, images):
-        if self.params.low_vram:
-            vae = self.pipe.vae
-            vae = vae.to(self.accelerator.device)
+        self.pipe.vae.to(self.accelerator.device)
+        #self.pipe.text_encoder_3.cpu()
 
         image_processor = self.pipe.image_processor
         images = image_processor.preprocess(images)
-        output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent_dist.sample()
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        output = self.pipe.vae.encode(images).latent_dist.sample()
 
         #if self.params.low_vram:
             #vae = vae.cpu()
         return output * self.pipe.vae.config.scaling_factor
 
-    def extract_embeddings(self, captions):
-        if self.params.low_vram:
-            text_encoder = self.pipe.text_encoder.to(self.accelerator.device)
-            text_encoder_2 = self.pipe.text_encoder_2.to(self.accelerator.device)
-            #text_encoder_3 = self.pipe.text_encoder_3.to(self.accelerator.device)
-        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
-        self.pipe.encode_prompt(prompt=captions, prompt_2=captions, prompt_3=captions, do_classifier_free_guidance=False, device=self.accelerator.device)
+    def extract_embeddings(self, caption):
+        #self.pipe.text_encoder.to(self.accelerator.device)
+        self.pipe.text_encoder.to(self.accelerator.device)
+        self.pipe.text_encoder_2.to(self.accelerator.device)
+        self.pipe.text_encoder_3.to(self.accelerator.device)
+        
+        # compress the caption for CLIP models
+        compressed_caption = compress_caption(caption)
 
-        #if self.params.low_vram:
-            #text_encoder = text_encoder.cpu()
-            #text_encoder_2 = text_encoder_2.cpu()
-            #text_encoder_3 = text_encoder_3.cpu()
+        gc.collect()
+        torch.cuda.empty_cache()
+        prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
+        self.pipe.encode_prompt(prompt=compressed_caption, prompt_2=compressed_caption, prompt_3=caption, do_classifier_free_guidance=False, device=self.accelerator.device)
         return prompt_embeds, pooled_prompt_embeds
     
     def validate(self):
-        transformer = self.pipe.transformer
-        transformer = transformer.to(self.accelerator.device)
         params = self.params
+        vae = self.pipe.vae
+        tokenizer = self.pipe.tokenizer
+        text_encoder_3 = self.pipe.text_encoder_3
+        transformer = self.pipe.transformer
+        scheduler = self.pipe.scheduler
+        if params.low_vram:
+            vae = vae.cpu()
+            transformer = transformer.cpu()
+            self.pipe.vae = None
+            self.pipe.transformer = None
+            torch.cuda.empty_cache()
+
         pil_to_tensor = PILToTensor()
         idx = 0
-        generator=torch.Generator(device="cuda").manual_seed(42)
-        for prompt in tqdm.tqdm(params.validation_prompts, desc='Generating validation images'):
-            image = self.pipe(
-                width=800,
-                height=1200,
-                prompt=prompt,
+        generator=torch.Generator().manual_seed(42)
+        latents = []
+        embeds = []
+        for prompt in tqdm.tqdm(params.validation_prompts, desc='Generating validation embeddings'):
+            compressed_prompt = compress_caption(prompt)
+            self.pipe.text_encoder_3 = text_encoder_3
+            prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
+                self.pipe.encode_prompt(compressed_prompt, compressed_prompt, prompt)
+            embeds.append((prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds))
+        
+        self.pipe.text_encoder.cpu()
+        self.pipe.text_encoder_2.cpu()
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        self.pipe.transformer = transformer
+        transformer = transformer.to(self.accelerator.device)
+        self.pipe.text_encoder_3 = None
+        self.pipe.to(self.accelerator.device)
+
+        for embed in tqdm.tqdm(embeds, desc='Generating validation latents'):
+            prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = embed
+            latent = self.pipe(
+                negative_prompt=None,
+                prompt_embeds=prompt_embeds.to(self.accelerator.device),
+                negative_prompt_embeds=negative_prompt_embeds.to(self.accelerator.device),
+                pooled_prompt_embeds=pooled_prompt_embeds.to(self.accelerator.device),
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds.to(self.accelerator.device),
+                guidance_scale=5.0,
                 num_inference_steps=20,
-                guidance_scale=4.0,
-                max_sequence_length=512,
-            ).images[0]
-            self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image), self.global_step)
+                generator=generator,
+                output_type='latent'
+            )[0]
+            latents.append(latent)
+
+        transformer = transformer.cpu()
+        self.pipe.transformer = None
+
+        self.pipe.vae = vae
+        vae = vae.to(self.accelerator.device)
+
+        idx = 0
+        for latent in tqdm.tqdm(latents, desc='Decoding validation latents'):
+            prompt = params.validation_prompts[idx]
+            latent = latent.to(vae.dtype)
+            image = vae.decode(latent / vae.config.scaling_factor, return_dict=False)[0]
+            image = self.pipe.image_processor.postprocess(image)
+            self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image[0]), self.global_step)
             idx = idx + 1
         
-        # save the transformer
-        self.pipe.transformer.save_pretrained(f'{self.global_step}')
-        transformer = transformer.cpu()
+        self.pipe.transformer = transformer
+        self.pipe.vae = vae
+        self.pipe.text_encoder_3 = text_encoder_3
+        self.pipe.to(dtype=torch.bfloat16)
     
     def optimize(self, model, batch):
-        if self.accelerator.is_main_process:
-            # we need to swap the vae and text encoders to cpu and transformer to gpu as it takes too much VRAM even on a A100!
-            text_encoder = self.pipe.text_encoder
-            text_encoder_2 = self.pipe.text_encoder_2
-            text_encoder_3 = self.pipe.text_encoder_3
-            vae = self.pipe.vae
-            transformer = self.pipe.transformer
+        text_encoder = self.pipe.text_encoder
+        text_encoder_2 = self.pipe.text_encoder_2
+        text_encoder_3 = self.pipe.text_encoder_3
+        vae = self.pipe.vae
+        transformer = self.pipe.transformer
 
-            text_encoder = text_encoder.cpu()
-            text_encoder_2 = text_encoder_2.cpu()
-            text_encoder_3 = text_encoder_3.cpu()
-            vae = vae.cpu()
-            transformer = transformer.to(self.accelerator.device)
+        text_encoder = text_encoder.cpu()
+        text_encoder_2 = text_encoder_2.cpu()
+        vae = vae.cpu()
+        transformer = transformer.to(self.accelerator.device)
 
         params = self.params
         batch_size = params.batch_size
