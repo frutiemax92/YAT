@@ -71,10 +71,11 @@ class SD35Trainer(Trainer):
         gc.collect()
         torch.cuda.empty_cache()
         output = self.pipe.vae.encode(images).latent_dist.sample()
+        output = (output - self.pipe.vae.config.shift_factor) * self.pipe.vae.config.scaling_factor
 
         #if self.params.low_vram:
             #vae = vae.cpu()
-        return output * self.pipe.vae.config.scaling_factor
+        return output
 
     def extract_embeddings(self, caption):
         #self.pipe.text_encoder.to(self.accelerator.device)
@@ -168,9 +169,7 @@ class SD35Trainer(Trainer):
         text_encoder_3 = self.pipe.text_encoder_3
         vae = self.pipe.vae
         transformer = self.pipe.transformer
-
-        text_encoder = text_encoder.cpu()
-        text_encoder_2 = text_encoder_2.cpu()
+        
         vae = vae.cpu()
         transformer = transformer.to(self.accelerator.device)
 
