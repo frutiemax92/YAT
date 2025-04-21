@@ -138,6 +138,12 @@ class TrainingParameters:
         self.low_vram = 'low_vram' in yaml_root.keys()
         self.use_calculated_features = 'use_calculated_features' in yaml_root.keys()
 
+        # REPA parameters
+        self.use_repa = 'use_repa' in yaml_root.keys()
+        self.repa_lambda = 0.5
+        if 'repa_lambda' in yaml_root.keys():
+            self.repa_lambda = float(yaml_root['repa_lambda'])
+
 if __name__ == '__main__':
     params = TrainingParameters()
     params.read_yaml('tests/config_sana.yaml')

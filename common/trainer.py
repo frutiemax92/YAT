@@ -25,6 +25,7 @@ import os
 import PIL
 from diffusers.training_utils import EMAModel
 from common.cache import CacheFeaturesCompute, CacheLoadFeatures
+from transformers import AutoImageProcessor, AutoModel
 import io
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
@@ -190,6 +191,16 @@ class Trainer:
             self.ema_model.to(self.accelerator.device)
         self.ema_model = None
 
+        # check if we use REPA regularisation loss
+        # https://github.com/sihyun-yu/REPA/tree/main
+        if self.params.use_repa:
+            self.repa_processor = AutoImageProcessor.from_pretrained('facebook/dinov2-base')
+            self.repa_model = AutoModel.from_pretrained('facebook/dinov2-base').to(torch.bfloat16)
+
+        # extract empty embedding
+        with torch.no_grad():
+            self.empty_embeddings = self.extract_embeddings('')
+
     def validate(self):
         raise NotImplemented
 
@@ -224,7 +235,7 @@ class Trainer:
 
         # save on the disk
         embedding = [emb.cpu() for emb in embedding]
-        to_save = (closest_ratio, latent.cpu(), embedding)
+        to_save = (closest_ratio, img.cpu(), latent.cpu(), embedding)
         torch.save(to_save, f'cache/{cache_idx}.npy')
     
     def run(self):
@@ -270,6 +281,39 @@ class Trainer:
                     loss = self.optimize(self.model, batch)
                     if self.preservation_model != None:
                         loss = loss + self.params.preservation_ratio * self.optimize(self.preservation_model, batch)
+                    
+                    # check if we are using repa
+                    if self.params.use_repa:
+                        self.repa_model.to(self.accelerator.device)
+                        images = batch[0]
+                        # extract the features with dino_v2 of the clean image in the spatial space
+                        with torch.no_grad():
+                            inputs = self.repa_processor(images=images.to(torch.float32), return_tensors="pt")
+                            inputs = inputs['pixel_values'].to(self.accelerator.device, dtype=torch.bfloat16)
+                            outputs = self.repa_model(inputs)
+                        last_hidden_states = outputs.last_hidden_state
+                        last_hidden_states = last_hidden_states.to(torch.bfloat16)
+
+                        # https://github.com/sihyun-yu/REPA/blob/main/loss.py#L78
+                        repa_projection = self.model.repa_proj
+                        def mean_flat(x):
+                            """
+                            Take the mean over all non-batch dimensions.
+                            """
+                            return torch.mean(x, dim=list(range(1, len(x.size()))))
+                        
+                        proj_loss = 0
+                        num_items = 0
+                        for i, (z, z_tilde) in enumerate(zip(last_hidden_states, repa_projection)):
+                            for j, (z_j, z_tilde_j) in enumerate(zip(z, z_tilde)):
+                                z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1) 
+                                z_j = torch.nn.functional.normalize(z_j, dim=-1) 
+                                proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
+                                num_items = num_items + 1
+
+                        proj_loss = proj_loss / num_items
+                        loss = loss + params.repa_lambda * proj_loss
+
                     avg_loss = avg_loss + loss
                     self.accelerator.backward(loss)
                     self.optimizer.step()
@@ -298,4 +342,7 @@ class Trainer:
                 if os.path.exists('cache'):
                     shutil.rmtree('cache')
                 os.makedirs('cache', exist_ok=True)
+            
+            if self.repa_model != None:
+                self.repa_model.cpu()
             self.accelerator.wait_for_everyone()

@@ -9,8 +9,7 @@ class CacheFeaturesCompute:
         cache_idx = 0
 
         # swap the model to the cpu while caching
-        if trainer.params.low_vram:
-            trainer.model = trainer.model.cpu()
+        trainer.model = trainer.model.cpu()
 
         if trainer.accelerator.is_main_process:
             it = range(trainer.params.cache_size * trainer.accelerator.num_processes)
@@ -50,8 +49,7 @@ class CacheLoadFeatures:
         cache_idx = 0
 
         # swap the model to the cpu while caching
-        if trainer.params.low_vram:
-            trainer.model = trainer.model.cpu()
+        trainer.model = trainer.model.cpu()
 
         if trainer.accelerator.is_main_process:
             it = range(trainer.params.cache_size * trainer.accelerator.num_processes)

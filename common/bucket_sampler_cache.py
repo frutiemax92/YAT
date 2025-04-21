@@ -96,26 +96,28 @@ class BucketDatasetWithCache(IterableDataset):
     
     def __iter__(self):
         for idx in tqdm(range(self.cache_size), desc='Processing cache'):
-            ratio, latent, embedding = torch.load(f'cache/{idx}.npy')
+            ratio, image, latent, embedding = torch.load(f'cache/{idx}.npy')
 
             # find if this bucket already exists
             if not ratio in self.buckets.keys():
                 self.buckets[ratio] = []
-            self.buckets[ratio].append((latent, embedding))
+            self.buckets[ratio].append((image, latent, embedding))
 
             # check if the bucket is full
             if len(self.buckets[ratio]) == self.total_batch_size:
-                # transform the PIL image to a tensor
                 latents = []
                 embeddings = []
+                images = []
                 current_batch = 0
                 for elem in self.buckets[ratio]:
-                    latent_tmp, embedding_tmp = elem
+                    image_tmp, latent_tmp, embedding_tmp = elem
                     latents.append(latent_tmp)
                     embeddings.append(embedding_tmp)
+                    images.append(image_tmp)
 
                     if len(latents) == self.batch_size:
                         batch = []
+                        batch.append(torch.stack(images).squeeze())
                         batch.append(torch.stack(latents).squeeze())
                         
                         num_dims = len(embeddings[0])
@@ -128,6 +130,7 @@ class BucketDatasetWithCache(IterableDataset):
                         yield batch
                         latents.clear()
                         embeddings.clear()
+                        images.clear()
                         current_batch = current_batch + 1
                 self.buckets.pop(ratio)
         
