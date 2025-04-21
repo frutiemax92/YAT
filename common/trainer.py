@@ -311,7 +311,7 @@ class Trainer:
                                 proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
                                 num_items = num_items + 1
 
-                        proj_loss = proj_loss / num_items
+                        proj_loss = proj_loss / (len(last_hidden_states) * params.batch_size)
                         loss = loss + params.repa_lambda * proj_loss
 
                     avg_loss = avg_loss + loss

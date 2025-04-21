@@ -31,6 +31,7 @@ class PixartSigmaTrainer(Trainer):
                 transformer = REPAPixArtTransformerModel.from_pretrained(params.pretrained_model_path)
             self.pipe.transformer = transformer
         self.pipe.transformer.enable_gradient_checkpointing()
+        self.pipe.vae.enable_gradient_checkpointing()
         
         self.scheduler = DDPMScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
         self.pipe.vae.train(False)
