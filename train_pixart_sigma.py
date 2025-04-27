@@ -12,6 +12,7 @@ import tqdm
 from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
+from utils.patch_pixart_sigma_pipeline import PatchedPixartSigmaPipeline
 from common.trainer import Trainer
 from transformers import AutoConfig, PretrainedConfig
 import gc
@@ -20,10 +21,10 @@ class PixartSigmaTrainer(Trainer):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
 
-        if params.bfloat16:
+        if params.use_repa == False:
             self.pipe = PixArtSigmaPipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16)
         else:
-            self.pipe = PixArtSigmaPipeline.from_pretrained(params.pretrained_pipe_path)
+            self.pipe = PatchedPixartSigmaPipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16)
         if params.pretrained_model_path != None:
             if params.use_repa == False:
                 transformer = PixArtTransformer2DModel.from_pretrained(params.pretrained_model_path)
