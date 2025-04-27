@@ -8,6 +8,7 @@ import torch
 from accelerate import Accelerator
 from diffusers import SanaPAGPipeline
 import gc
+from tarfile import ReadError
 
 def flush():
     gc.collect()
@@ -29,10 +30,14 @@ class RoundRobinMix(torch.utils.data.IterableDataset):
             for i in tqdm(range(self.buffer_size), desc='Downloading images'):
                 try:
                     item = next(self.iterators[self.curr_dataset])
-                except StopIteration:
-                    print(f'print self.curr_dataset={self.curr_dataset}')
+                except ReadError as e:
+                    print('IOError!')
+                    continue
+                except StopIteration as e:
+                    print(f'StopIteration exception!')
                     self.iterators[self.curr_dataset] = iter(self.datasets[self.curr_dataset])
                     item = next(self.iterators[self.curr_dataset])
+                
                 self.buffer.append(item)
             self.curr_dataset = self.curr_dataset + 1
             if self.curr_dataset >= self.num_datasets:

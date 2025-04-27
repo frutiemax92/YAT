@@ -49,9 +49,12 @@ class Trainer:
         def node_no_split(src):
             return src
 
+        def custom_handler(exn):
+            print(f"WebDataset error: {repr(exn)} -- skipping")
+            return True  # continue
         if params.use_calculated_features == False:
-            datasets = [wds.WebDataset(url, shardshuffle=False, handler=wds.ignore_and_continue, nodesplitter=node_no_split).\
-                        decode('pil').to_tuple(["jpg", 'jpeg'], "txt", handler=wds.ignore_and_continue) for url in urls]
+            datasets = [wds.WebDataset(url, shardshuffle=False, handler=custom_handler, nodesplitter=node_no_split, resampled=True).\
+                        decode('pil').to_tuple(["jpg", 'jpeg'], "txt", handler=custom_handler) for url in urls]
             self.cache_calculator = CacheFeaturesCompute()
         else:
             def custom_decoder(key, value):
@@ -59,7 +62,7 @@ class Trainer:
                     buffer = io.BytesIO(value)
                     return torch.load(buffer)
                 return value
-            datasets = [wds.WebDataset(url, shardshuffle=False, handler=wds.ignore_and_continue, nodesplitter=node_no_split).\
+            datasets = [wds.WebDataset(url, shardshuffle=False, handler=custom_handler, nodesplitter=node_no_split, resampled=True).\
                         decode(custom_decoder).to_tuple('npy') for url in urls]
             self.cache_calculator = CacheLoadFeatures()
         mix = RoundRobinMix(datasets, params.dataset_seed)
