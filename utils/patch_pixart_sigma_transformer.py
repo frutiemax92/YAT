@@ -209,7 +209,7 @@ def patch_pixart_sigma_transformer(transformer,
                                                     repa_projector_dim, 
                                                     repa_encoder_hidden_size)
     transformer.repa_projections = []
-    transformer.save_pretrained('repa_test')
+    transformer.save_pretrained('repa_test_vae')
 
 if __name__ == '__main__':
     mlp = ThreeLayerMLP(1152, 2048, 768)

@@ -5,6 +5,7 @@ from transformers import T5EncoderModel, T5Tokenizer
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_256_BIN, ASPECT_RATIO_512_BIN, ASPECT_RATIO_1024_BIN, ASPECT_RATIO_2048_BIN
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import retrieve_timesteps
+from diffusers.image_processor import PixArtImageProcessor
 from diffusers.utils import (
     BACKENDS_MAPPING,
     deprecate,
@@ -24,7 +25,19 @@ else:
 
 class PatchedPixartSigmaPipeline(PixArtSigmaPipeline):
     def __init__(self, tokenizer, text_encoder, vae, transformer, scheduler):
-        super().__init__(tokenizer, text_encoder, vae, transformer, scheduler)
+        DiffusionPipeline().__init__()
+
+        self.register_modules(
+            tokenizer=tokenizer, text_encoder=text_encoder, vae=vae, transformer=transformer, scheduler=scheduler
+        )
+
+        if self.vae != None:
+            if hasattr(self.vae.config, 'block_out_channels'):
+                self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
+            else:
+                self.vae_scale_factor = 2**(len(vae.config['decoder_block_out_channels'])-1)
+
+            self.image_processor = PixArtImageProcessor(vae_scale_factor=self.vae_scale_factor)
     
     @torch.no_grad()
     def __call__(self,
