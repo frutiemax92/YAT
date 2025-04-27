@@ -37,7 +37,7 @@ class PixartSigmaTrainer(Trainer):
         self.pipe.vae.train(False)
         self.pipe.text_encoder.train(False)
 
-        vae_compression = 8
+        vae_compression = self.pipe.vae_scale_factor
         resolution = self.pipe.transformer.config.sample_size * vae_compression
         if resolution == 256:
             self.aspect_ratios = ASPECT_RATIO_256_BIN

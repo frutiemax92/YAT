@@ -69,13 +69,13 @@ class PatchedPixartSigmaPipeline(PixArtSigmaPipeline):
         height = height or self.transformer.config.sample_size * self.vae_scale_factor
         width = width or self.transformer.config.sample_size * self.vae_scale_factor
         if use_resolution_binning:
-            if self.transformer.config.sample_size == 256:
+            if self.transformer.config.sample_size == 16:
                 aspect_ratio_bin = ASPECT_RATIO_2048_BIN
-            elif self.transformer.config.sample_size == 128:
+            elif self.transformer.config.sample_size == 8:
                 aspect_ratio_bin = ASPECT_RATIO_1024_BIN
-            elif self.transformer.config.sample_size == 64:
+            elif self.transformer.config.sample_size == 4:
                 aspect_ratio_bin = ASPECT_RATIO_512_BIN
-            elif self.transformer.config.sample_size == 32:
+            elif self.transformer.config.sample_size == 2:
                 aspect_ratio_bin = ASPECT_RATIO_256_BIN
             else:
                 raise ValueError("Invalid sample size")
