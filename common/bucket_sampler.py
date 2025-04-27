@@ -30,6 +30,7 @@ class RoundRobinMix(torch.utils.data.IterableDataset):
                 try:
                     item = next(self.iterators[self.curr_dataset])
                 except StopIteration:
+                    print(f'print self.curr_dataset={self.curr_dataset}')
                     self.iterators[self.curr_dataset] = iter(self.datasets[self.curr_dataset])
                     item = next(self.iterators[self.curr_dataset])
                 self.buffer.append(item)

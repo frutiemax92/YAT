@@ -67,7 +67,11 @@ class PixartSigmaTrainer(Trainer):
 
         gc.collect()
         torch.cuda.empty_cache()
-        output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent_dist.sample()
+
+        if self.pipe.vae.config['_class_name'] != 'AutoencoderDC':
+            output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent_dist.sample()
+        else:
+            output = vae.encode(images).latent
         return output * self.pipe.vae.config.scaling_factor
 
     def extract_embeddings(self, captions):
@@ -177,7 +181,7 @@ class PixartSigmaTrainer(Trainer):
                                 encoder_hidden_states=embeddings.to(dtype=transformer.dtype),
                                 timestep=timesteps,
                                 encoder_attention_mask=attention_mask.to(dtype=transformer.dtype)).sample.chunk(2, 1)[0]
-        target = noise
+        target = noise[:noise_pred.shape[0], :noise_pred.shape[1], :noise_pred.shape[2], :noise_pred.shape[3]]
         loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
 
         if hasattr(model, 'get_alphas'):

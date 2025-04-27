@@ -1,8 +1,8 @@
 numpy==1.26.4
 diffusers>=0.32.0.dev
 transformers
-torch
-torchvision
+torch==2.2.2+cu121
+torchvision==0.17.2+cu121
 accelerate
 beautifulsoup4
 ftfy
