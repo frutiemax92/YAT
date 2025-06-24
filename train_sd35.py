@@ -24,7 +24,6 @@ class SD35Trainer(Trainer):
         if params.bfloat16:
             if self.params.low_vram:
                 # put the T5 model as 8 bits
-                config_8bit = BitsAndBytesConfig(load_in_8bit=True, llm_int8_enable_fp32_cpu_offload=True)
                 text_encoder_3 = T5EncoderModel.from_pretrained(params.pretrained_pipe_path,
                                                                 subfolder='text_encoder_3',
                                                                 torch_dtype=torch.bfloat16)
