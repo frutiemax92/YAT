@@ -180,7 +180,7 @@ class SanaTrainer(Trainer):
         
         params = self.params
         batch_size = params.batch_size
-        latents, embeddings, attention_mask = batch
+        _, latents, embeddings, attention_mask = batch
 
         loss_fn = torch.nn.MSELoss()
         noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=self.pipe.dtype)

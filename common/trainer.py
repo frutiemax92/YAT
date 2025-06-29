@@ -346,6 +346,6 @@ class Trainer:
                     shutil.rmtree('cache')
                 os.makedirs('cache', exist_ok=True)
             
-            if self.repa_model != None:
+            if hasattr(self, 'repa_model'):
                 self.repa_model.cpu()
             self.accelerator.wait_for_everyone()
