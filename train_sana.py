@@ -33,6 +33,9 @@ class SanaTrainer(Trainer):
             self.aspect_ratios = ASPECT_RATIO_1024_BIN
         else:
             self.aspect_ratios = ASPECT_RATIO_2048_BIN
+            
+            # enable vae tiling for this resolution
+            self.pipe.vae.enable_tiling(tile_sample_min_width=1024, tile_sample_min_height=1024)
 
         if params.bfloat16:
             self.pipe = self.pipe.to(torch.bfloat16)
