@@ -143,6 +143,10 @@ class TrainingParameters:
         self.repa_lambda = 0.5
         if 'repa_lambda' in yaml_root.keys():
             self.repa_lambda = float(yaml_root['repa_lambda'])
+        
+        self.save_to_disk = False
+        if 'save_to_disk' in yaml_root.keys():
+            self.save_to_disk = True
 
 if __name__ == '__main__':
     params = TrainingParameters()

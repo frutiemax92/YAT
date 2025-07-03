@@ -38,11 +38,11 @@ class DataExtractor(IterableDataset):
         tqdm.write(f'Process Index = {self.process_index}')
         while True:
             random.seed(self.seed)
-            for img, caption in self.dataset:
+            for dataset_url, filename, img, caption in self.dataset:
                 img = self.pipe.image_processor.pil_to_numpy(img)
                 img = torch.tensor(img).to(dtype=self.pipe.dtype)
                 img = torch.moveaxis(img, -1, 1)
-                yield img, caption
+                yield dataset_url, filename, img, caption
 
 class DataExtractorFeatures(IterableDataset):
     def __init__(self,
@@ -75,7 +75,8 @@ class BucketDatasetWithCache(IterableDataset):
                  cache_size,
                  aspect_ratios,
                  accelerator : Accelerator,
-                 pipe):
+                 pipe,
+                 embedding_size = (300, 2304)):
         super().__init__()
         self.cache_size = cache_size * accelerator.num_processes
         self.total_batch_size = batch_size * accelerator.num_processes
@@ -84,6 +85,7 @@ class BucketDatasetWithCache(IterableDataset):
         self.accelerator = accelerator
         self.pipe = pipe
         self.buckets = {}
+        self.embedding_size = embedding_size
 
         # create the cache folder
         if self.accelerator.is_main_process:
@@ -119,13 +121,30 @@ class BucketDatasetWithCache(IterableDataset):
                         batch = []
                         batch.append(torch.stack(images).squeeze())
                         batch.append(torch.stack(latents).squeeze())
+
+                        # here, we need to make sure all the embeddings fit into a size
+                        embeds = []
+                        masks = []
+                        for idx in range(len(embeddings)):
+                            max_len = self.embedding_size  # assuming this is your target sequence length, e.g., 300
+
+                            # Get current embedding
+                            emb = embeddings[idx]  # Shape: (93, 2304)
+                            length = emb.shape[0]
+
+                            # Initialize padded tensor and mask
+                            padded = torch.zeros(max_len)
+                            mask = torch.zeros((max_len[0],))
+
+                            # Copy values
+                            padded[:length] = emb
+                            mask[:length] = 1
+
+                            embeds.append(padded)
+                            masks.append(mask)
                         
-                        num_dims = len(embeddings[0])
-                        for i in range(num_dims):
-                            dim = []
-                            for embed in embeddings:
-                                dim.append(embed[i])
-                            batch.append(torch.stack(dim).squeeze())
+                        batch.append(torch.stack(embeds).squeeze())
+                        batch.append(torch.stack(masks).squeeze())
                         
                         yield batch
                         latents.clear()

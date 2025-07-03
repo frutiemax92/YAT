@@ -101,7 +101,10 @@ class SanaTrainer(Trainer):
             "Please generate only the enhanced description for the prompt below and avoid including any additional commentary or evaluations:",
             "User Prompt: ",
         ])
-        return prompt_embeds, prompt_attention_mask
+
+        # only save embeddings where the mask is not zero
+        embeds = prompt_embeds[prompt_attention_mask.bool()]
+        return embeds
     
     def validate(self):
         params = self.params

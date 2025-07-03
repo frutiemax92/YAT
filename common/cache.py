@@ -1,9 +1,10 @@
 import tqdm
 import torch
+import os
 
 class CacheFeaturesCompute:
-    def __init__(self):
-        pass
+    def __init__(self, save_to_disk=True):
+        self.save_to_disk = save_to_disk
     
     def run(self, trainer):
         cache_idx = 0
@@ -19,14 +20,29 @@ class CacheFeaturesCompute:
                                             trainer.accelerator.num_processes)
         for cache_idx in tqdm.tqdm(it, desc='Extracting latents and captions'):
             if trainer.accelerator.is_main_process:
-                img, caption = next(trainer.data_extractor_iter)
+                dataset_url, filename, img, caption = next(trainer.data_extractor_iter)
+                dataset_url = dataset_url[0]
+                filename = filename[0]
+                features_path = f'datasets/{dataset_url}/{filename}.npy'
 
                 if cache_idx % trainer.accelerator.num_processes != 0:
                     torch.save(img[0], f'cache/{cache_idx}.mpy')
                     with open(f'cache/{cache_idx}.txt', 'w') as f:
                         f.write(caption[0])
+                    
+                    # also save the filename associated with the cache_idx in case we save to disk
+                    if self.save_to_disk:
+                        with open(f'cache/{cache_idx}', 'w') as f:
+                            f.write(f'datasets/{dataset_url}/{filename}.npy')
                 else:
-                    trainer.cache_latents_embeddings(img, caption[0], cache_idx)
+                    if os.path.exists(features_path) == False:
+                        to_save = trainer.cache_latents_embeddings(img, caption[0], cache_idx)
+
+                        if self.save_to_disk:
+                            torch.save(to_save, f'datasets/{dataset_url}/{filename}.npy')
+                    else:
+                        to_save = torch.load(features_path)
+                        torch.save(to_save, f'cache/{cache_idx}.npy')
             else:
                 # try to read the image and caption when they're available
                 while True:
@@ -39,7 +55,22 @@ class CacheFeaturesCompute:
                         continue
             
                 # start with the caching
-                trainer.cache_latents_embeddings(img, caption, cache_idx)
+                # read the filename first
+                cache_file_name = f'cache/{cache_idx}'
+                found_features = False
+                if os.path.exists(cache_file_name):
+                    with open(f'cache/{cache_idx}', 'r') as f:
+                        features_path = f.read()
+                    if os.path.exists(features_path):
+                        found_features = True
+
+                if found_features == False:
+                    to_save = trainer.cache_latents_embeddings(img, caption, cache_idx)
+                    if self.save_to_disk:
+                        torch.save(to_save, features_path)
+                else:
+                    to_save = torch.load(features_path)
+                    torch.save(to_save, f'cache/{cache_idx}.npy')
 
 class CacheLoadFeatures:
     def __init__(self):

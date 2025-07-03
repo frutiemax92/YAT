@@ -53,19 +53,29 @@ class Trainer:
             print(f"WebDataset error: {repr(exn)} -- skipping")
             return True  # continue
         if params.use_calculated_features == False:
-            datasets = [wds.WebDataset(url, shardshuffle=False, handler=custom_handler, nodesplitter=node_no_split, resampled=True).\
-                        decode('pil').to_tuple(["jpg", 'jpeg'], "txt", handler=custom_handler) for url in urls]
-            self.cache_calculator = CacheFeaturesCompute()
+            datasets = {
+                url: wds.WebDataset(
+                    url,
+                    shardshuffle=False,
+                    handler=custom_handler,
+                    nodesplitter=node_no_split,
+                    resampled=True
+                )
+                .decode("pil")
+                .to_tuple("__key__", ["jpg", "jpeg"], "txt", handler=custom_handler)
+                for url in urls
+            }
+            self.cache_calculator = CacheFeaturesCompute(save_to_disk=params.save_to_disk)
         else:
             def custom_decoder(key, value):
                 if key.endswith('.npy') or key.endswith('.npz'):
                     buffer = io.BytesIO(value)
                     return torch.load(buffer)
                 return value
-            datasets = [wds.WebDataset(url, shardshuffle=False, handler=custom_handler, nodesplitter=node_no_split, resampled=True).\
-                        decode(custom_decoder).to_tuple('npy') for url in urls]
+            datasets = {url : wds.WebDataset(url, shardshuffle=False, handler=custom_handler, nodesplitter=node_no_split, resampled=True).\
+                        decode(custom_decoder).to_tuple('npy') for url in urls}
             self.cache_calculator = CacheLoadFeatures()
-        mix = RoundRobinMix(datasets, params.dataset_seed)
+        mix = RoundRobinMix(datasets, params.dataset_seed, save_to_disk=self.params.save_to_disk)
 
         self.mix = mix
         self.preservation_model = None
@@ -237,9 +247,12 @@ class Trainer:
             embedding = self.extract_embeddings(caption)
 
         # save on the disk
-        embedding = [emb.cpu() for emb in embedding]
+        embedding = embedding.cpu()
         to_save = (closest_ratio, img.cpu(), latent.cpu(), embedding)
         torch.save(to_save, f'cache/{cache_idx}.npy')
+
+        # return the tensor in case we save to disk
+        return to_save
     
     def run(self):
         params = self.params

@@ -8,6 +8,7 @@ import torch
 from accelerate import Accelerator
 from diffusers import SanaPAGPipeline
 import gc
+import os
 from tarfile import ReadError
 
 def flush():
@@ -15,8 +16,23 @@ def flush():
     torch.cuda.empty_cache()
 
 class RoundRobinMix(torch.utils.data.IterableDataset):
-    def __init__(self, datasets, seed=0, accelerator=None):
-        self.datasets = datasets
+    def __init__(self, datasets, seed=0, accelerator=None, save_to_disk=True):
+        self.datasets = list(datasets.values())
+        self.dataset_urls = list(datasets.keys())
+
+        # don't put the .tar in the dataset names
+        for idx in range(len(self.dataset_urls)):
+            url = self.dataset_urls[idx]
+            url = url.replace('.tar', '')
+            self.dataset_urls[idx] = url
+
+        # create the required folders if we are saving to the disk
+        if save_to_disk:
+            # make a datasets folder
+            os.makedirs('datasets', exist_ok=True)
+            for url in self.dataset_urls:
+                os.makedirs('datasets/' + url, exist_ok=True)
+
         self.num_datasets = len(datasets)
         self.curr_dataset = 0
         self.iterators = [iter(dataset) for dataset in self.datasets]
@@ -38,6 +54,7 @@ class RoundRobinMix(torch.utils.data.IterableDataset):
                     self.iterators[self.curr_dataset] = iter(self.datasets[self.curr_dataset])
                     item = next(self.iterators[self.curr_dataset])
                 
+                item = (self.dataset_urls[self.curr_dataset],) + item
                 self.buffer.append(item)
             self.curr_dataset = self.curr_dataset + 1
             if self.curr_dataset >= self.num_datasets:
