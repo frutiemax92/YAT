@@ -226,7 +226,7 @@ class Trainer:
     def save_model(self):
         self.model.save_pretrained(f'models/{self.global_step}')
 
-    def cache_latents_embeddings(self, img, caption, cache_idx):
+    def cache_latents_embeddings(self, img, caption, cache_idx, save_img=False):
         img = torch.squeeze(img)
 
         # find the aspect ratio
@@ -248,7 +248,10 @@ class Trainer:
 
         # save on the disk
         embedding = embedding.cpu()
-        to_save = (closest_ratio, img.cpu(), latent.cpu(), embedding)
+        img.cpu()
+        if save_img == False:
+            img = None
+        to_save = (closest_ratio, img, latent.cpu(), embedding)
         torch.save(to_save, f'cache/{cache_idx}.npy')
 
         # return the tensor in case we save to disk

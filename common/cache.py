@@ -4,7 +4,7 @@ import os
 import gzip
 
 class CacheFeaturesCompute:
-    def __init__(self, save_to_disk=True):
+    def __init__(self, save_to_disk=True, save_img=False):
         self.save_to_disk = save_to_disk
     
     def run(self, trainer):
