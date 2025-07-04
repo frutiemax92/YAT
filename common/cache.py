@@ -1,6 +1,7 @@
 import tqdm
 import torch
 import os
+import gzip
 
 class CacheFeaturesCompute:
     def __init__(self, save_to_disk=True):
@@ -39,9 +40,11 @@ class CacheFeaturesCompute:
                         to_save = trainer.cache_latents_embeddings(img, caption[0], cache_idx)
 
                         if self.save_to_disk:
-                            torch.save(to_save, f'datasets/{dataset_url}/{filename}.npy')
+                            with gzip.open(features_path, 'wb') as f:
+                                torch.save(to_save, f)
                     else:
-                        to_save = torch.load(features_path)
+                        with gzip.open(features_path, 'rb') as f:
+                            to_save = torch.load(f)
                         torch.save(to_save, f'cache/{cache_idx}.npy')
             else:
                 # try to read the image and caption when they're available
@@ -67,9 +70,11 @@ class CacheFeaturesCompute:
                 if found_features == False:
                     to_save = trainer.cache_latents_embeddings(img, caption, cache_idx)
                     if self.save_to_disk:
-                        torch.save(to_save, features_path)
+                        with gzip.open(features_path, 'wb') as f:
+                            torch.save(to_save, f)
                 else:
-                    to_save = torch.load(features_path)
+                    with gzip.open(features_path, 'rb') as f:
+                        to_save = torch.load(f)
                     torch.save(to_save, f'cache/{cache_idx}.npy')
 
 class CacheLoadFeatures:

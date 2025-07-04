@@ -147,6 +147,10 @@ class TrainingParameters:
         self.save_to_disk = False
         if 'save_to_disk' in yaml_root.keys():
             self.save_to_disk = True
+        
+        self.bucket_repeat = 1
+        if 'bucket_repeat' in yaml_root.keys():
+            self.bucket_repeat = int(yaml_root['bucket_repeat'])
 
 if __name__ == '__main__':
     params = TrainingParameters()

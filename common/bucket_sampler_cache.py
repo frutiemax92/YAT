@@ -76,7 +76,8 @@ class BucketDatasetWithCache(IterableDataset):
                  aspect_ratios,
                  accelerator : Accelerator,
                  pipe,
-                 embedding_size = (300, 2304)):
+                 embedding_size = (300, 2304),
+                 bucket_repeat=5):
         super().__init__()
         self.cache_size = cache_size * accelerator.num_processes
         self.total_batch_size = batch_size * accelerator.num_processes
@@ -86,6 +87,7 @@ class BucketDatasetWithCache(IterableDataset):
         self.pipe = pipe
         self.buckets = {}
         self.embedding_size = embedding_size
+        self.bucket_repeat = bucket_repeat
 
         # create the cache folder
         if self.accelerator.is_main_process:
@@ -111,46 +113,47 @@ class BucketDatasetWithCache(IterableDataset):
                 embeddings = []
                 images = []
                 current_batch = 0
-                for elem in self.buckets[ratio]:
-                    image_tmp, latent_tmp, embedding_tmp = elem
-                    latents.append(latent_tmp)
-                    embeddings.append(embedding_tmp)
-                    images.append(image_tmp)
+                for repeat in range(self.bucket_repeat):
+                    for elem in self.buckets[ratio]:
+                        image_tmp, latent_tmp, embedding_tmp = elem
+                        latents.append(latent_tmp)
+                        embeddings.append(embedding_tmp)
+                        images.append(image_tmp)
 
-                    if len(latents) == self.batch_size:
-                        batch = []
-                        batch.append(torch.stack(images).squeeze())
-                        batch.append(torch.stack(latents).squeeze())
+                        if len(latents) == self.batch_size:
+                            batch = []
+                            batch.append(torch.stack(images).squeeze())
+                            batch.append(torch.stack(latents).squeeze())
 
-                        # here, we need to make sure all the embeddings fit into a size
-                        embeds = []
-                        masks = []
-                        for idx in range(len(embeddings)):
-                            max_len = self.embedding_size  # assuming this is your target sequence length, e.g., 300
+                            # here, we need to make sure all the embeddings fit into a size
+                            embeds = []
+                            masks = []
+                            for idx in range(len(embeddings)):
+                                max_len = self.embedding_size  # assuming this is your target sequence length, e.g., 300
 
-                            # Get current embedding
-                            emb = embeddings[idx]  # Shape: (93, 2304)
-                            length = emb.shape[0]
+                                # Get current embedding
+                                emb = embeddings[idx]  # Shape: (93, 2304)
+                                length = emb.shape[0]
 
-                            # Initialize padded tensor and mask
-                            padded = torch.zeros(max_len)
-                            mask = torch.zeros((max_len[0],))
+                                # Initialize padded tensor and mask
+                                padded = torch.zeros(max_len)
+                                mask = torch.zeros((max_len[0],))
 
-                            # Copy values
-                            padded[:length] = emb
-                            mask[:length] = 1
+                                # Copy values
+                                padded[:length] = emb
+                                mask[:length] = 1
 
-                            embeds.append(padded)
-                            masks.append(mask)
-                        
-                        batch.append(torch.stack(embeds).squeeze())
-                        batch.append(torch.stack(masks).squeeze())
-                        
-                        yield batch
-                        latents.clear()
-                        embeddings.clear()
-                        images.clear()
-                        current_batch = current_batch + 1
+                                embeds.append(padded)
+                                masks.append(mask)
+                            
+                            batch.append(torch.stack(embeds).squeeze())
+                            batch.append(torch.stack(masks).squeeze())
+                            
+                            yield batch
+                            latents.clear()
+                            embeddings.clear()
+                            images.clear()
+                            current_batch = current_batch + 1
                 self.buckets.pop(ratio)
         
         for j in range(self.accelerator.num_processes):
