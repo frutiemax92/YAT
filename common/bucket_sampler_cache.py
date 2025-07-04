@@ -122,7 +122,10 @@ class BucketDatasetWithCache(IterableDataset):
 
                         if len(latents) == self.batch_size:
                             batch = []
-                            batch.append(torch.stack(images).squeeze())
+                            if images[0] != None:
+                                batch.append(torch.stack(images).squeeze())
+                            else:
+                                batch.append(torch.stack(latents).squeeze())
                             batch.append(torch.stack(latents).squeeze())
 
                             # here, we need to make sure all the embeddings fit into a size
