@@ -337,6 +337,8 @@ class Trainer:
 
                     avg_loss = avg_loss + loss
                     self.accelerator.backward(loss)
+                    self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    
                     self.optimizer.step()
 
                     if self.ema_model != None:
