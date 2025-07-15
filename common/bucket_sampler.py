@@ -16,22 +16,24 @@ def flush():
     torch.cuda.empty_cache()
 
 class RoundRobinMix(torch.utils.data.IterableDataset):
-    def __init__(self, datasets, seed=0, accelerator=None, save_to_disk=True):
+    def __init__(self, datasets, seed=0, accelerator=None, save_to_disk=False, folders=None):
         self.datasets = list(datasets.values())
         self.dataset_urls = list(datasets.keys())
+        self.folders = folders
 
         # don't put the .tar in the dataset names
-        for idx in range(len(self.dataset_urls)):
-            url = self.dataset_urls[idx]
-            url = url.replace('.tar', '')
-            self.dataset_urls[idx] = url
-
-        # create the required folders if we are saving to the disk
         if save_to_disk:
+            for idx in range(len(self.folders)):
+                url = self.folders[idx]
+                url = url.replace('.tar', '')
+                self.folders[idx] = url
+            
             # make a datasets folder
             os.makedirs('datasets', exist_ok=True)
-            for url in self.dataset_urls:
-                os.makedirs('datasets/' + url, exist_ok=True)
+            for folder in folders:
+                os.makedirs('datasets/' + folder, exist_ok=True)
+        else:
+            self.folders = self.dataset_urls
 
         self.num_datasets = len(datasets)
         self.curr_dataset = 0
@@ -49,12 +51,15 @@ class RoundRobinMix(torch.utils.data.IterableDataset):
                 except ReadError as e:
                     print('IOError!')
                     continue
+                except OSError as e:
+                    print('OSError!')
+                    continue
                 except StopIteration as e:
                     print(f'StopIteration exception!')
                     self.iterators[self.curr_dataset] = iter(self.datasets[self.curr_dataset])
                     item = next(self.iterators[self.curr_dataset])
                 
-                item = (self.dataset_urls[self.curr_dataset],) + item
+                item = (self.folders[self.curr_dataset],) + item
                 self.buffer.append(item)
             self.curr_dataset = self.curr_dataset + 1
             if self.curr_dataset >= self.num_datasets:

@@ -52,6 +52,8 @@ class Trainer:
         def custom_handler(exn):
             print(f"WebDataset error: {repr(exn)} -- skipping")
             return True  # continue
+        
+        self.folders = params.urls if params.urls != None else params.r2_tar_files
         if params.use_calculated_features == False:
             datasets = {
                 url: wds.WebDataset(
@@ -75,7 +77,7 @@ class Trainer:
             datasets = {url : wds.WebDataset(url, shardshuffle=False, handler=custom_handler, nodesplitter=node_no_split, resampled=True).\
                         decode(custom_decoder).to_tuple('npy') for url in urls}
             self.cache_calculator = CacheLoadFeatures()
-        mix = RoundRobinMix(datasets, params.dataset_seed, save_to_disk=self.params.save_to_disk)
+        mix = RoundRobinMix(datasets, params.dataset_seed, save_to_disk=self.params.save_to_disk, folders=self.folders)
 
         self.mix = mix
         self.preservation_model = None
@@ -129,7 +131,7 @@ class Trainer:
                                                      self.params.cache_size,
                                                      self.aspect_ratios,
                                                      self.accelerator,
-                                                     self.pipe)
+                                                     self.pipe, bucket_repeat=params.bucket_repeat)
         self.data_extractor_iter = iter(self.dataloader_extractor)
         
         def collate_fn(batch):
