@@ -2,6 +2,7 @@ import tqdm
 import torch
 import os
 import gzip
+import json
 
 class CacheFeaturesCompute:
     def __init__(self, save_to_disk=True, save_img=False):
@@ -28,13 +29,13 @@ class CacheFeaturesCompute:
 
                 if cache_idx % trainer.accelerator.num_processes != 0:
                     torch.save(img[0], f'cache/{cache_idx}.mpy')
+                    to_save = {}
+                    to_save['caption'] = caption[0]
+                    to_save['url'] = f'datasets/{dataset_url}/{filename}.npy'
+
+                    to_save = json.dumps(to_save)
                     with open(f'cache/{cache_idx}.txt', 'w') as f:
-                        f.write(caption[0])
-                    
-                    # also save the filename associated with the cache_idx in case we save to disk
-                    if self.save_to_disk:
-                        with open(f'cache/{cache_idx}', 'w') as f:
-                            f.write(f'datasets/{dataset_url}/{filename}.npy')
+                        f.write(to_save)
                 else:
                     if os.path.exists(features_path) == False:
                         to_save = trainer.cache_latents_embeddings(img, caption[0], cache_idx)
@@ -52,28 +53,24 @@ class CacheFeaturesCompute:
                     try:
                         img = torch.load(f'cache/{cache_idx}.mpy')
                         with open(f'cache/{cache_idx}.txt') as f:
-                            caption = f.read()
+                            json_root = f.read()
                         break
                     except:
                         continue
             
                 # start with the caching
                 # read the filename first
-                cache_file_name = f'cache/{cache_idx}'
-                found_features = False
-                if os.path.exists(cache_file_name):
-                    with open(f'cache/{cache_idx}', 'r') as f:
-                        features_path = f.read()
-                    if os.path.exists(features_path):
-                        found_features = True
+                json_root = json.loads(json_root)
+                caption = json_root['caption']
+                url = json_root['url']
 
-                if found_features == False:
+                if os.path.exists(url) == False:
                     to_save = trainer.cache_latents_embeddings(img, caption, cache_idx)
                     if self.save_to_disk:
-                        with gzip.open(features_path, 'wb') as f:
+                        with gzip.open(url, 'wb') as f:
                             torch.save(to_save, f)
                 else:
-                    with gzip.open(features_path, 'rb') as f:
+                    with gzip.open(url, 'rb') as f:
                         to_save = torch.load(f)
                 torch.save(to_save, f'cache/{cache_idx}.npy')
 
