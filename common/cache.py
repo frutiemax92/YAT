@@ -75,7 +75,7 @@ class CacheFeaturesCompute:
                 else:
                     with gzip.open(features_path, 'rb') as f:
                         to_save = torch.load(f)
-                    torch.save(to_save, f'cache/{cache_idx}.npy')
+                torch.save(to_save, f'cache/{cache_idx}.npy')
 
 class CacheLoadFeatures:
     def __init__(self):
