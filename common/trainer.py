@@ -268,7 +268,6 @@ class Trainer:
 
         while self.global_step < self.params.steps:
             self.cache_calculator.run(self)
-            self.accelerator.wait_for_everyone()
                 
             # then go through the cache items
             for batch in self.dataloader_sampler:

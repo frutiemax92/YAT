@@ -45,6 +45,7 @@ class CacheFeaturesCompute:
                 torch.save(to_save, f'cache/{cache_idx}.npy')
             cache_idx = cache_idx + 1
             pbar.update(1)
+            trainer.accelerator.wait_for_everyone()
 
 class CacheLoadFeatures:
     def __init__(self):
