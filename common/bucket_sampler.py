@@ -45,37 +45,22 @@ class RoundRobinMix(torch.utils.data.IterableDataset):
 
     def __iter__(self):
         while True:
-            for i in tqdm(range(self.buffer_size), desc='Downloading images'):
-                try:
-                    item = next(self.iterators[self.curr_dataset])
-                except ReadError as e:
-                    print('IOError!')
-                    continue
-                except OSError as e:
-                    print('OSError!')
-                    continue
-                except StopIteration as e:
-                    print(f'StopIteration exception!')
-                    self.iterators[self.curr_dataset] = iter(self.datasets[self.curr_dataset])
-                    item = next(self.iterators[self.curr_dataset])
+            try:
+                item = next(self.iterators[self.curr_dataset])
+            except ReadError as e:
+                print('IOError!')
+                continue
+            except OSError as e:
+                print('OSError!')
+                continue
+            except StopIteration as e:
+                print(f'StopIteration exception!')
+                self.iterators[self.curr_dataset] = iter(self.datasets[self.curr_dataset])
+                item = next(self.iterators[self.curr_dataset])
                 
-                item = (self.folders[self.curr_dataset],) + item
-                self.buffer.append(item)
-            self.curr_dataset = self.curr_dataset + 1
-            if self.curr_dataset >= self.num_datasets:
-                random.shuffle(self.buffer)
-                if self.accelerator != None:
-                    print(f'process_index = {self.accelerator.process_index}')
-                for item in self.buffer:
-                    yield item
-                self.buffer.clear()
-                self.curr_dataset = 0
-
-            # try:
-            #     yield next(self.iterators[self.curr_dataset])
-            # except:
-            #     self.iterators[self.curr_dataset] = iter(self.datasets[self.curr_dataset])
-            # self.curr_dataset = (self.curr_dataset + 1) % self.num_datasets
+            item = (self.folders[self.curr_dataset],) + item
+            self.curr_dataset = (self.curr_dataset + 1) % self.num_datasets
+            yield item
 
 class BucketDataset(IterableDataset):
     def __init__(self,
