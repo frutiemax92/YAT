@@ -19,4 +19,4 @@ def get_secured_urls(r2_access_key : str,
         'get_object',
         Params={'Bucket': r2_bucket_name, 'Key':tar_file},
         ExpiresIn=604800
-    ) for tar_file in r2_tar_files]
+    ) for tar_file in r2_tar_files], s3_client

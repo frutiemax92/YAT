@@ -58,6 +58,11 @@ class TrainingParameters:
         else:
             self.urls = yaml_root['urls']
         
+        self.r2_upload_key = None
+        if 'r2_upload_key' in yaml_root.keys():
+            self.r2_upload_key = yaml_root['r2_upload_key']
+            self.r2_upload_shard_size = yaml_root['r2_upload_shard_size']
+        
         if 'url_probs' in yaml_root.keys():
             self.url_probs = [float(prob) for prob in yaml_root['url_probs']]
         

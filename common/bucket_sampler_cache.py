@@ -63,7 +63,6 @@ class DataExtractorFeatures(IterableDataset):
         self.process_index = process_index
 
     def __iter__(self):
-        tqdm.write(f'Process Index = {self.process_index}')
         while True:
             random.seed(self.seed)
             for item in self.dataset:
