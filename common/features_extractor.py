@@ -67,7 +67,7 @@ class FeaturesExtractor:
             s3_client.upload_file(path, bucket, key)
             os.remove(path)
         
-        for images, captions in dataset_fetcher:
+        for images, captions, ratio in dataset_fetcher:
             with torch.no_grad():
                 with torch.autocast('cuda'):
                     # extract the vae features
@@ -77,6 +77,7 @@ class FeaturesExtractor:
             for i in range(batch_size):
                 sample = {
                     "__key__": f'{current_element:07d}',
+                    'ratio': ratio,
                     'latent.pt': tensor_to_bytes(latents[i]),
                     'emb.pt': tensor_to_bytes(embeddings[i])
                 }

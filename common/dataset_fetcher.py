@@ -86,6 +86,6 @@ class DatasetFetcher:
                     # features = self.model.extract_features(images)
                     # yield features, captions
 
-                    yield images, captions
+                    yield images, captions, bucket
 
             self.current_shard_index = (self.current_shard_index + 1) % self.num_shards
