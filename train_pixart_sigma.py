@@ -13,11 +13,11 @@ from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
 from utils.patch_pixart_sigma_pipeline import PatchedPixartSigmaPipeline
-from common.trainer import Trainer
+from common.trainer import Model
 from transformers import AutoConfig, PretrainedConfig
 import gc
 
-class PixartSigmaTrainer(Trainer):
+class PixartSigmaTrainer(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
 

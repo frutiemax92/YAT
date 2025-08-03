@@ -9,9 +9,10 @@ import tqdm
 from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
-from common.trainer import Trainer
+from common.trainer import Model
+from common.features_extractor import FeaturesExtractor
 
-class SanaTrainer(Trainer):
+class SanaModel(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
         self.pipe = SanaPAGPipeline.from_pretrained(params.pretrained_pipe_path, pag_applied_layers="transformer_blocks.8")
@@ -67,18 +68,7 @@ class SanaTrainer(Trainer):
 
         # move vae to cuda if it's not already done
         vae = vae.to(device=self.accelerator.device)
-
-        if self.params.low_vram == False or self.params.batch_size >= 8:
-            output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
-        else:
-            output = []
-            for image in images:
-                image = image.unsqueeze(0)
-                latent = self.pipe.vae.encode(image.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
-                output.append(latent)
-                
-            output = torch.stack(output)
-            output = torch.squeeze(output, dim=1)
+        output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
         return output * self.pipe.vae.config.scaling_factor
 
     def extract_embeddings(self, captions):
@@ -219,5 +209,8 @@ if __name__ == '__main__':
     params = TrainingParameters()
     params.read_yaml(args.config)
 
-    trainer = SanaTrainer(params)
+    trainer = SanaModel(params)
+    if params.extract_features:
+        features_extractor = FeaturesExtractor(trainer, params)
+        features_extractor.run()
     trainer.run()

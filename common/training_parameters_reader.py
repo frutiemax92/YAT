@@ -48,7 +48,6 @@ class TrainingParameters:
         with open(file) as f:
             contents = f.read()
         yaml_root = yaml.load(contents, Loader=yaml.BaseLoader)
-
         if 'r2_endpoint' in yaml_root.keys():
             self.r2_endpoint = yaml_root['r2_endpoint']
             self.r2_access_key = yaml_root['r2_access_key']
@@ -58,6 +57,8 @@ class TrainingParameters:
         else:
             self.urls = yaml_root['urls']
         
+        self.num_shards = int(yaml_root['num_shards']) if 'num_shards' in yaml_root.keys() else None
+        self.r2_dataset_folder = yaml_root['r2_dataset_folder'] if 'r2_dataset_folder' in yaml_root.keys() else None
         self.r2_upload_key = None
         if 'r2_upload_key' in yaml_root.keys():
             self.r2_upload_key = yaml_root['r2_upload_key']
@@ -68,6 +69,7 @@ class TrainingParameters:
         
         if 'dataset_seed' in yaml_root.keys():
             self.dataset_seed = int(yaml_root['dataset_seed'])
+        self.extract_features = 'extract_features' in yaml_root.keys()
         
         self.batch_size = int(yaml_root['batch_size'])
         self.pretrained_pipe_path = yaml_root['pretrained_pipe_path']

@@ -25,7 +25,14 @@ def generate_shards(params : TrainingParameters,
     writer = wds.ShardWriter(shard_template, maxcount=shard_size)
     
     for url in tqdm(urls, desc='iterating through urls'):
-        next_url, s3_client = get_secured_urls(params.r2_access_key, params.r2_secret_key, params.r2_endpoint, params.r2_bucket_name, [url])
+        next_url = get_secured_urls(params.r2_access_key, params.r2_secret_key, params.r2_endpoint, params.r2_bucket_name, [url])
+        session = boto3.Session(
+            aws_access_key_id=params.r2_access_key,
+            aws_secret_access_key=params.r2_secret_key
+        )
+        config = Config(signature_version='s3v4')
+        s3_client = session.client('s3', endpoint_url=params.r2_endpoint, config=config)
+
         dataset = wds.WebDataset(next_url).decode()
         for elem in tqdm(dataset, desc='iterating through samples'):
             writer.write(elem)

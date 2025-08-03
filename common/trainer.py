@@ -30,8 +30,30 @@ import io
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
-class Trainer:
+class Model:
     def __init__(self, params : TrainingParameters):
+        self.accelerator = Accelerator(gradient_accumulation_steps=params.gradient_accumulation_steps)
+
+    def extract_latents(self, images):
+        raise NotImplemented
+    
+    def extract_embeddings(self, captions):
+        raise NotImplemented
+    
+    def find_closest_ratio(self, ratio):
+        # find the closest ratio from the aspect ratios table
+        min_distance = 100
+        target_ratio = 0.6
+        for r in self.aspect_ratios.keys():
+            distance = abs(float(r) - ratio)
+            if min_distance > distance:
+                target_ratio = r
+                min_distance = distance
+        
+        # Return the result as a tuple (target_ratio, idx)
+        return str(target_ratio)
+    
+    def initialize(self):
         self.params = params
         self.global_step = 0
 
@@ -43,8 +65,6 @@ class Trainer:
                                     params.r2_tar_files)
         else:
             urls = params.urls
-        
-        self.accelerator = Accelerator(gradient_accumulation_steps=params.gradient_accumulation_steps)
         
         def node_no_split(src):
             return src
@@ -81,28 +101,7 @@ class Trainer:
 
         self.mix = mix
         self.preservation_model = None
-        
-
-    def extract_latents(self, images):
-        raise NotImplemented
     
-    def extract_embeddings(self, captions):
-        raise NotImplemented
-    
-    def find_closest_ratio(self, ratio):
-        # find the closest ratio from the aspect ratios table
-        min_distance = 100
-        target_ratio = 0.6
-        for r in self.aspect_ratios.keys():
-            distance = abs(float(r) - ratio)
-            if min_distance > distance:
-                target_ratio = r
-                min_distance = distance
-        
-        # Return the result as a tuple (target_ratio, idx)
-        return str(target_ratio)
-    
-    def initialize(self):
         params = self.params
 
         if params.use_calculated_features == False:

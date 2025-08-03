@@ -1,6 +1,15 @@
 import boto3
 from botocore.config import Config
 
+def get_client(r2_access_key, r2_secret_key, r2_endpoint):
+    session = boto3.Session(
+    aws_access_key_id=r2_access_key,
+    aws_secret_access_key=r2_secret_key
+)
+    config = Config(signature_version='s3v4')
+    s3_client = session.client('s3', endpoint_url=r2_endpoint, config=config)
+    return s3_client
+
 def get_secured_urls(r2_access_key : str,
                      r2_secret_key : str,
                      r2_endpoint : str,
@@ -19,4 +28,4 @@ def get_secured_urls(r2_access_key : str,
         'get_object',
         Params={'Bucket': r2_bucket_name, 'Key':tar_file},
         ExpiresIn=604800
-    ) for tar_file in r2_tar_files], s3_client
+    ) for tar_file in r2_tar_files]

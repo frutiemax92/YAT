@@ -11,13 +11,13 @@ import tqdm
 from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
-from common.trainer import Trainer
+from common.trainer import Model
 from diffusers import BitsAndBytesConfig
 from transformers import T5EncoderModel
 from utils.compress_caption import compress_caption
 import gc
 
-class SD35Trainer(Trainer):
+class SD35Trainer(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
         
