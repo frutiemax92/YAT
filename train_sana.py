@@ -38,8 +38,7 @@ class SanaModel(Model):
             # enable vae tiling for this resolution
             self.pipe.vae.enable_tiling(tile_sample_min_width=1024, tile_sample_min_height=1024)
 
-        if params.bfloat16:
-            self.pipe = self.pipe.to(torch.bfloat16)
+        self.pipe = self.pipe.to(torch.bfloat16)
         self.model = self.pipe.transformer
         self.model.enable_gradient_checkpointing()
     
@@ -47,19 +46,13 @@ class SanaModel(Model):
         super().initialize()
         #self.pipe = self.pipe.to(self.accelerator.device)
         self.pipe.transformer = self.model
-        text_encoder = self.pipe.text_encoder
-        vae = self.pipe.vae
+        text_encoder = torch.compile(self.pipe.text_encoder)
+        self.pipe.vae = torch.compile(self.pipe.vae)
         transformer = self.pipe.transformer
         
-        if self.params.low_vram:
-            if self.accelerator.is_main_process:
-                vae = vae.to(device=self.accelerator.device)
-                text_encoder = text_encoder.to(device=self.accelerator.device)
-                transformer = transformer.cpu()
-        else:
-            transformer = transformer.to(self.accelerator.device)
-            vae = vae.to(self.accelerator.device)
-            text_encoder = text_encoder.to(self.accelerator.device)
+        transformer = transformer.to(self.accelerator.device)
+        vae = vae.to(self.accelerator.device)
+        text_encoder = text_encoder.to(self.accelerator.device)
     
     def extract_latents(self, images):
         image_processor = self.pipe.image_processor
@@ -67,13 +60,13 @@ class SanaModel(Model):
         vae = self.pipe.vae
 
         # move vae to cuda if it's not already done
-        vae = vae.to(device=self.accelerator.device)
+        #vae = vae.to(device=self.accelerator.device)
         output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
         return output * self.pipe.vae.config.scaling_factor
 
     def extract_embeddings(self, captions):
         # move text_encoder to cuda if not already done
-        self.pipe.text_encoder = self.pipe.text_encoder.to(device=self.accelerator.device)
+        #self.pipe.text_encoder = self.pipe.text_encoder.to(device=self.accelerator.device)
         
         prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
         self.pipe.encode_prompt(captions,
@@ -211,6 +204,9 @@ if __name__ == '__main__':
 
     trainer = SanaModel(params)
     if params.extract_features:
+        trainer.pipe.transformer.cpu()
+        trainer.pipe.vae.to(trainer.accelerator.device)
+        trainer.pipe.text_encoder.to(trainer.accelerator.device)
         features_extractor = FeaturesExtractor(trainer, params)
         features_extractor.run()
     trainer.run()

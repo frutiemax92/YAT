@@ -8,6 +8,7 @@ import os
 import numpy as np
 import webdataset as wds
 from torchvision import transforms
+from concurrent.futures import ThreadPoolExecutor
 from common.dataset_fetcher import DatasetFetcher
 from common.cloudflare import get_client
 import io
@@ -33,7 +34,6 @@ class FeaturesExtractor:
         # build the webdataset from the shard range
         shards = [(shard_index, f'{self.params.r2_dataset_folder}/shard-{shard_index:06d}.tar') for shard_index in range(self.shard_index_begin, self.shard_index_end)]
         batch_size = self.params.batch_size
-
         dataset_fetcher = DatasetFetcher([shard[1] for shard in shards],
                                          r2_access_key=self.params.r2_access_key,
                                          r2_secret_key=self.params.r2_secret_key,
@@ -59,12 +59,20 @@ class FeaturesExtractor:
 
         pbar = tqdm(total=shard_size, desc="processing shard elements")
         stream = open(local_path, 'wb')
+        executor = ThreadPoolExecutor(max_workers=2)
+        upload_futures = []
         writer = wds.TarWriter(stream)
+
+        def upload_and_cleanup(path, bucket, key):
+            s3_client.upload_file(path, bucket, key)
+            os.remove(path)
+        
         for images, captions in dataset_fetcher:
             with torch.no_grad():
-                # extract the vae features
-                latents = self.model.extract_latents(images)
-                embeddings = self.model.extract_embeddings(captions)
+                with torch.autocast('cuda'):
+                    # extract the vae features
+                    latents = self.model.extract_latents(images)
+                    embeddings = self.model.extract_embeddings(captions)
 
             for i in range(batch_size):
                 sample = {
@@ -81,7 +89,14 @@ class FeaturesExtractor:
                     s3_client = get_client(self.params.r2_access_key,
                                         self.params.r2_secret_key,
                                         self.params.r2_endpoint)
-                    s3_client.upload_file(local_path, self.params.r2_bucket_name, remote_key)
+                    future = executor.submit(
+                        upload_and_cleanup,
+                        local_path,
+                        self.params.r2_bucket_name,
+                        remote_key
+                    )
+                    upload_futures.append(future)
+
                     current_shard = current_shard + 1
                     current_element = 0
                     pbar.reset()
@@ -93,17 +108,5 @@ class FeaturesExtractor:
                     stream = open(local_path, 'wb')
                     remote_key = f'{upload_key}/{shard_filename}'
                     writer = wds.TarWriter(stream)
-
-            
-
-                
-
-            
-
-
-
-            
-
-
-
-                
+        for future in upload_futures:
+            future.result()

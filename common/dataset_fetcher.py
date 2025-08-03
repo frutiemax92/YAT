@@ -24,80 +24,68 @@ class DatasetFetcher:
         self.queues = {}
     
     def __iter__(self):
-        while True:
-            # generate a secured url for the shard
-            dataset_url = get_secured_urls(self.r2_access_key,
-                     self.r2_secret_key,
-                     self.r2_endpoint,
-                     self.r2_bucket_name,
-                     [self.shards[self.current_shard_index]])[0]
+        # Compose transforms: resize and to tensor
+        def get_transform(bucket):
+            aspect_ratio = self.model.aspect_ratios[bucket]
+            target_height = int(aspect_ratio[0])
+            target_width = int(aspect_ratio[1])
+            return transforms.Compose([
+                transforms.Resize((target_height, target_width))
+            ])
             
-            # generate a dataset for it
+        while True:
+            dataset_url = get_secured_urls(
+                self.r2_access_key,
+                self.r2_secret_key,
+                self.r2_endpoint,
+                self.r2_bucket_name,
+                [self.shards[self.current_shard_index]]
+            )[0]
+
             def assign_bucket(img):
                 w, h = img.size
                 return self.model.find_closest_ratio(h / w)
-            
+
             def with_bucket(sample):
                 image, caption = sample
                 bucket = assign_bucket(image)
                 return {"jpg": image, "txt": caption, "bucket": bucket}
-            
-            to_tensor = transforms.ToTensor()
-            def bucketed_batcher(data_iter, batch_size):
-                to_tensor = transforms.ToTensor() 
 
-                for sample in data_iter:
-                    bucket = sample["bucket"]
 
-                    if bucket not in self.queues.keys():
-                        self.queues[bucket] = []
-                    
-                    # here we need to resize the image for the correct size for the model
-                    img = sample['jpg']
-                    aspect_ratio = self.model.aspect_ratios[sample['bucket']]
-                    target_height = int(aspect_ratio[0])
-                    target_width = int(aspect_ratio[1])
-                    img = img.resize((target_width, target_height))
 
-                    # transform that image to a tensor
-                    sample['jpg'] = to_tensor(img)
-                    self.queues[bucket].append(sample)
-
-                    if len(self.queues[bucket]) >= batch_size:
-                        batch = self.queues[bucket][:batch_size]
-                        self.queues[bucket] = []
-                        yield batch
-            
-            dataset = wds.WebDataset(dataset_url, shardshuffle=False,
-                                    nodesplitter=None,
-                                    workersplitter=None)\
-                .shuffle(1000)\
-                .decode('pil')\
-                .to_tuple('jpg', 'txt')\
+            dataset = (
+                wds.WebDataset(dataset_url, shardshuffle=False, nodesplitter=None, workersplitter=None)
+                .shuffle(1000)
+                .decode('pil')
+                .to_tuple('jpg', 'txt')
                 .map(with_bucket)
-            
-            for sample in dataset:
+            )
+            loader = wds.WebLoader(dataset, batch_size=None, num_workers=4)
+
+            to_tensor = transforms.Compose([
+                transforms.ToTensor()
+            ])
+            for sample in loader:
                 bucket = sample["bucket"]
-
-                if bucket not in self.queues.keys():
+                if bucket not in self.queues:
                     self.queues[bucket] = []
-                
-                # here we need to resize the image for the correct size for the model
-                img = sample['jpg']
-                aspect_ratio = self.model.aspect_ratios[sample['bucket']]
-                target_height = int(aspect_ratio[0])
-                target_width = int(aspect_ratio[1])
-                img = img.resize((target_width, target_height))
 
-                # transform that image to a tensor
-                sample['jpg'] = to_tensor(img)
+                # Apply transform
+                sample["jpg"] = to_tensor(sample["jpg"])
                 self.queues[bucket].append(sample)
 
                 if len(self.queues[bucket]) >= self.batch_size:
                     batch = self.queues[bucket][:self.batch_size]
                     self.queues[bucket] = []
-                    images = torch.stack([x["jpg"] for x in batch])
+                    
+                    transform = get_transform(bucket)
+                    images = torch.stack([transform(x["jpg"]) for x in batch])
                     captions = [x["txt"] for x in batch]
+
+                    # Feature extraction (example)
+                    # features = self.model.extract_features(images)
+                    # yield features, captions
+
                     yield images, captions
 
             self.current_shard_index = (self.current_shard_index + 1) % self.num_shards
