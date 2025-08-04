@@ -103,7 +103,6 @@ class FeaturesExtractor:
                     pbar.reset()
 
                     # delete the file and increase the shard index
-                    os.remove(local_path)
                     shard_filename = f'shard-{shards[current_shard][0]:06d}.tar'
                     local_path = os.path.join(local_temp_dir, shard_filename)
                     stream = open(local_path, 'wb')
