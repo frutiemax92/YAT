@@ -4,6 +4,7 @@ from common.cloudflare import get_secured_urls
 import boto3
 from botocore.config import Config
 import webdataset as wds
+from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 import os
 
@@ -17,6 +18,8 @@ def generate_shards(params : TrainingParameters,
     shard_size = int(params.r2_upload_shard_size)
     upload_key = params.r2_upload_key
     urls = params.r2_tar_files
+    executor = ThreadPoolExecutor(max_workers=2)
+    upload_futures = []
 
     shard_template = f'{local_temp_dir}/shard-%06d.tar'
     shard_filename = f"shard-{current_shard:06d}.tar"
@@ -33,24 +36,40 @@ def generate_shards(params : TrainingParameters,
         config = Config(signature_version='s3v4')
         s3_client = session.client('s3', endpoint_url=params.r2_endpoint, config=config)
 
+        def upload_and_cleanup(path, bucket, key):
+            s3_client.upload_file(path, bucket, key)
+            os.remove(path)
+
         dataset = wds.WebDataset(next_url).decode()
         for elem in tqdm(dataset, desc='iterating through samples'):
-            elem['__key__'] = f'{current_element:06d}'
-            writer.write(elem)
+            new_key = f'{current_element:06d}'
+
+            try:
+                new_dict = {'__key__': new_key, 'jpg' : elem['jpg'], 'txt' : elem['txt']}
+            except:
+                continue
+            writer.write(new_dict)
             current_element = current_element + 1
 
             if current_element >= shard_size:
                 writer.next_stream()
-                s3_client.upload_file(local_path, params.r2_bucket_name, remote_key)
+
+                future = executor.submit(
+                        upload_and_cleanup,
+                        local_path,
+                        params.r2_bucket_name,
+                        remote_key
+                    )
+                upload_futures.append(future)
                 current_shard = current_shard + 1
                 current_element = 0
 
-                # delete the file and increase the shard index
-                os.remove(local_path)
                 shard_template = f'{local_temp_dir}/shard-%06d.tar'
                 shard_filename = f"shard-{current_shard:06d}.tar"
                 local_path = os.path.join(local_temp_dir, shard_filename)
                 remote_key = f'{upload_key}/{shard_filename}'
+    for future in upload_futures:
+        future.result()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
