@@ -86,7 +86,7 @@ class SanaModel(Model):
         ])
 
         # only save embeddings where the mask is not zero
-        embeds = prompt_embeds[prompt_attention_mask.bool()]
+        embeds = [prompt_embeds[idx][prompt_attention_mask[idx].bool()] for idx in range(len(captions))]
         return embeds
     
     def validate(self):
