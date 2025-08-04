@@ -53,12 +53,7 @@ class DatasetFetcher:
                 .batched(16)
                 .to_tuple('jpg', 'txt')
             )
-            loader = wds.WebLoader(dataset, batch_size=None, num_workers=4)
-
-            to_tensor = transforms.Compose([
-                transforms.ToTensor()
-            ])
-            for batch in loader:
+            for batch in dataset:
                 images = batch[0]
                 captions = batch[1]
                 for idx in range(len(images)):
