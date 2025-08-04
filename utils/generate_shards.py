@@ -35,6 +35,7 @@ def generate_shards(params : TrainingParameters,
 
         dataset = wds.WebDataset(next_url).decode()
         for elem in tqdm(dataset, desc='iterating through samples'):
+            elem['__key__'] = f'{current_element:06d}'
             writer.write(elem)
             current_element = current_element + 1
 
