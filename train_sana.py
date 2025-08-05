@@ -209,4 +209,5 @@ if __name__ == '__main__':
         trainer.pipe.text_encoder.to(trainer.accelerator.device)
         features_extractor = FeaturesExtractor(trainer, params)
         features_extractor.run()
-    trainer.run()
+    else:
+        trainer.run()
