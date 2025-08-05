@@ -1,7 +1,8 @@
 import webdataset as wds
-from common.cloudflare import get_secured_urls
+from common.cloudflare import get_secured_urls, download_tar
 from torchvision import transforms
 import torch
+import os
 
 class DatasetFetcher:
     def __init__(self, shards : list[str], 
@@ -10,7 +11,8 @@ class DatasetFetcher:
                     r2_endpoint,
                     r2_bucket_name,
                     batch_size,
-                    model):
+                    model,
+                    local_temp_dir='temp'):
         self.shards = shards
         self.r2_access_key = r2_access_key
         self.r2_secret_key = r2_secret_key
@@ -22,6 +24,8 @@ class DatasetFetcher:
         self.model = model
 
         self.queues = {}
+        self.local_temp_dir = local_temp_dir
+        os.makedirs(local_temp_dir, exist_ok=True)
     
     def __iter__(self):
         # Compose transforms: resize and to tensor
@@ -43,12 +47,15 @@ class DatasetFetcher:
                 [self.shards[self.current_shard_index]]
             )[0]
 
+            local_shard_path = self.local_temp_dir + f'/shard_{self.model.accelerator.process_index}.tar'
+            download_tar(dataset_url, local_shard_path)
+
             def assign_bucket(img):
                 w, h = img.size
                 return self.model.find_closest_ratio(h / w)
 
             dataset = (
-                wds.WebDataset(dataset_url, shardshuffle=False, nodesplitter=None, workersplitter=None)
+                wds.WebDataset(local_shard_path, shardshuffle=False, nodesplitter=None, workersplitter=None, handler=wds.ignore_and_continue)
                 .decode('pil')
                 .batched(16)
                 .to_tuple('jpg', 'txt')
