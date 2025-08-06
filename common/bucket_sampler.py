@@ -10,149 +10,96 @@ from diffusers import SanaPAGPipeline
 import gc
 import os
 from tarfile import ReadError
+from common.cloudflare import get_secured_urls, download_tar
+import webdataset as wds
+import argparse
+from common.training_parameters_reader import TrainingParameters
+import io
+
 
 def flush():
     gc.collect()
     torch.cuda.empty_cache()
 
-class RoundRobinMix(torch.utils.data.IterableDataset):
-    def __init__(self, datasets, seed=0, accelerator=None, save_to_disk=False, folders=None):
-        self.datasets = list(datasets.values())
-        self.dataset_urls = list(datasets.keys())
-        self.folders = folders
-
-        # don't put the .tar in the dataset names
-        if save_to_disk:
-            for idx in range(len(self.folders)):
-                url = self.folders[idx]
-                url = url.replace('.tar', '')
-                self.folders[idx] = url
-            
-            # make a datasets folder
-            os.makedirs('datasets', exist_ok=True)
-            for folder in folders:
-                os.makedirs('datasets/' + folder, exist_ok=True)
-        else:
-            self.folders = self.dataset_urls
-
-        self.num_datasets = len(datasets)
-        self.curr_dataset = 0
-        self.iterators = [iter(dataset) for dataset in self.datasets]
-        self.buffer_size = 100
-        self.buffer = []
-        self.accelerator = accelerator
-        random.seed(seed)
-
-    def __iter__(self):
-        while True:
-            try:
-                item = next(self.iterators[self.curr_dataset])
-            except ReadError as e:
-                print('IOError!')
-                continue
-            except OSError as e:
-                print('OSError!')
-                continue
-            except StopIteration as e:
-                print(f'StopIteration exception!')
-                self.iterators[self.curr_dataset] = iter(self.datasets[self.curr_dataset])
-                item = next(self.iterators[self.curr_dataset])
-                
-            item = (self.folders[self.curr_dataset],) + item
-            self.curr_dataset = (self.curr_dataset + 1) % self.num_datasets
-            yield item
-
-class BucketDataset(IterableDataset):
+class BucketSampler:
     def __init__(self,
-                 dataset,
-                 batch_size,
-                 aspect_ratios,
+                 shards : list[str],
+                 features_path : str,
                  accelerator : Accelerator,
-                 pipe,
-                 extract_latents_handler,
-                 extract_embeddings_handler,
-                 discard_low_res=True):
-        super().__init__()
-        self.dataset = dataset
-        self.total_batch_size = batch_size * accelerator.num_processes
+                 batch_size : int,
+                 r2_access_key : str,
+                 r2_secret_key : str,
+                 r2_endpoint : str,
+                 r2_bucket_name : str,
+                 local_temp_dir : str = 'temp'  
+                 ):
+        self.process_index = accelerator.process_index
+        self.num_processes = accelerator.num_processes
+        self.device = accelerator.device
+        self.shards = shards
+        self.buckets = {}
         self.batch_size = batch_size
-        self.aspect_ratios = aspect_ratios
-        self.discard_low_res = discard_low_res
-        self.accelerator = accelerator
-        self.pipe = pipe
-        self.extract_embeddings_handler = extract_embeddings_handler
-        self.extract_latents_handler = extract_latents_handler
+        self.r2_access_key = r2_access_key
+        self.r2_secret_key = r2_secret_key
+        self.r2_endpoint = r2_endpoint
+        self.r2_bucket_name = r2_bucket_name
+        self.local_temp_dir = local_temp_dir
+        self.features_path = features_path
+
+    def add_bucket(self, ratio):
+        self.buckets[ratio] = torch.tensor([0], device=self.device)
     
-    def extract_embeddings(self, captions : list[str]):
-        return self.extract_embeddings_handler(captions)
-
-    def extract_latents(self, images : torch.Tensor):
-        return self.extract_latents_handler(images)
-
-    def find_closest_ratio(self, img):
-        width = img.shape[-1]
-        height = img.shape[-2]
-        ratio = height / width
-
-        # find the closest ratio from the aspect ratios table
-        min_distance = 100
-        target_ratio = 0.6
-        for r in self.aspect_ratios.keys():
-            distance = abs(float(r) - ratio)
-            if min_distance > distance:
-                target_ratio = r
-                min_distance = distance
-        
-        # Return the result as a tuple (target_ratio, idx)
-        return str(target_ratio)
-
     def __iter__(self):
-        buckets = {}
-        images_count = 0
+        current_shard_index = 0
+        num_shards = len(self.shards)
+
+        def pt_decoder(key, value):
+            if key.endswith(".pt"):
+                # Load the tensor from the bytes object
+                return torch.load(io.BytesIO(value))
+            else:
+                return value.decode('utf-8')
+    
         while True:
-            discarded_images = 0
-            for img, caption in self.dataset:
-                images_count = images_count + 1
-                img = self.pipe.image_processor.pil_to_numpy(img)
-                img = torch.tensor(img).to(dtype=self.pipe.dtype)
-                img = torch.moveaxis(img, -1, 1)
-            
-                # calculate the closest aspect ratio for the image
-                ratio = self.find_closest_ratio(img)
-                height_target = int(self.aspect_ratios[ratio][0])
-                width_target = int(self.aspect_ratios[ratio][1])
-                width = img.shape[-1]
-                height = img.shape[-2]
+            dataset_url = get_secured_urls(self.r2_access_key,
+                                           self.r2_secret_key,
+                                            self.r2_endpoint,
+                                            self.r2_bucket_name,
+                                            [self.features_path + '/' + self.shards[current_shard_index]]
+                                           )[0]
+            local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}.tar'
+            download_tar(dataset_url, local_shard_path)
 
-                # check if we discard this image due to a too low resolution
-                if height_target > height and width_target > width and self.discard_low_res:
-                    # don't push this image in any bucket
-                    discarded_images = discarded_images + 1
-                    continue
+            dataset = (
+                wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None, handler=wds.ignore_and_continue)
+                .decode(pt_decoder)
+                .to_tuple('ratio', 'latent.pt', 'emb.pt')
+            )
 
-                resize_transform = Resize((height_target, width_target))
-                img = resize_transform(img)
+            for ratio, latent, emb in dataset:
+                yield ratio, latent, emb
 
-                # find if this bucket already exists
-                if not ratio in buckets.keys():
-                    buckets[ratio] = []
-                buckets[ratio].append((img, caption))
 
-                # check if the bucket is full
-                if len(buckets[ratio]) == self.total_batch_size:
-                    # transform the PIL image to a tensor
-                    images_tmp = []
-                    captions_tmp = []
-                    for elem in buckets[ratio]:
-                        img_tmp, caption_tmp = elem
-                        images_tmp.append(img_tmp)
-                        captions_tmp.append(caption_tmp)
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', required=True, type=str)
+    args = parser.parse_args()
 
-                        if len(images_tmp) == self.batch_size:
-                            with torch.no_grad():
-                                latents = self.extract_latents(images_tmp)
-                                embeddings, prompt_attention_masks = self.extract_embeddings(captions_tmp)
-                            yield latents, embeddings, prompt_attention_masks
-                            images_tmp.clear()
-                            captions_tmp.clear()
-                    buckets.pop(ratio)
+    params = TrainingParameters()
+    params.read_yaml(args.config)
+    
+    shards = [f'shard-{idx:06}.tar' for idx in range(66)]
+    shards.extend([f'shard-{idx:06}.tar' for idx in range(70, 200)])
+    shards.extend([f'shard-{idx:06}.tar' for idx in range(204, 271)])
+
+    accelerator = Accelerator()
+    sampler = BucketSampler(shards,
+                            params.r2_dataset_folder,
+                            accelerator,
+                            params.batch_size,
+                            params.r2_access_key,
+                            params.r2_secret_key,
+                            params.r2_endpoint,
+                            params.r2_bucket_name)
+    for ratio, latent, emb in sampler:
+        print(ratio)

@@ -3,7 +3,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_2048_BIN
 from diffusers import SanaTransformer2DModel, FlowMatchEulerDiscreteScheduler
 from diffusers.training_utils import compute_density_for_timestep_sampling
-from diffusers import SanaPipeline, SanaPAGPipeline
+from diffusers import SanaPipeline, SanaPAGPipeline, AutoencoderDC
 import torch
 import tqdm
 from torchvision.transforms import PILToTensor
@@ -15,7 +15,8 @@ from common.features_extractor import FeaturesExtractor
 class SanaModel(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
-        self.pipe = SanaPAGPipeline.from_pretrained(params.pretrained_pipe_path, pag_applied_layers="transformer_blocks.8")
+        self.pipe = SanaPAGPipeline.from_pretrained(params.pretrained_pipe_path, 
+                                                    pag_applied_layers="transformer_blocks.8")
         if params.pretrained_model_path != None:
             transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path) 
             self.pipe.transformer = transformer
@@ -38,7 +39,10 @@ class SanaModel(Model):
             # enable vae tiling for this resolution
             self.pipe.vae.enable_tiling(tile_sample_min_width=1024, tile_sample_min_height=1024)
 
-        self.pipe = self.pipe.to(torch.bfloat16)
+        self.pipe.transformer.to(torch.bfloat16)
+        self.pipe.text_encoder.to(torch.bfloat16)
+        self.pipe.vae.to(torch.bfloat16)
+
         self.model = self.pipe.transformer
         self.model.enable_gradient_checkpointing()
     
@@ -46,8 +50,6 @@ class SanaModel(Model):
         super().initialize()
         #self.pipe = self.pipe.to(self.accelerator.device)
         self.pipe.transformer = self.model
-        text_encoder = torch.compile(self.pipe.text_encoder)
-        self.pipe.vae = torch.compile(self.pipe.vae)
         transformer = self.pipe.transformer
         
         transformer = transformer.to(self.accelerator.device)
@@ -55,14 +57,8 @@ class SanaModel(Model):
         text_encoder = text_encoder.to(self.accelerator.device)
     
     def extract_latents(self, images):
-        image_processor = self.pipe.image_processor
-        images = image_processor.preprocess(images)
-        vae = self.pipe.vae
-
-        # move vae to cuda if it's not already done
-        #vae = vae.to(device=self.accelerator.device)
-        output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent
-        return output * self.pipe.vae.config.scaling_factor
+        output = self.pipe.vae.encode(images.to(dtype=self.pipe.vae.dtype)).latent
+        return output.to(torch.bfloat16) * self.pipe.vae.config.scaling_factor
 
     def extract_embeddings(self, captions):
         # move text_encoder to cuda if not already done

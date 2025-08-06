@@ -1,6 +1,7 @@
 import boto3
 from botocore.config import Config
 import requests
+from tqdm import tqdm
 
 def get_client(r2_access_key, r2_secret_key, r2_endpoint):
     session = boto3.Session(
@@ -35,5 +36,5 @@ def download_tar(url, local_path):
     with requests.get(url, stream=True) as r:
         r.raise_for_status()
         with open(local_path, 'wb') as f:
-            for chunk in r.iter_content(chunk_size=8192):
+            for chunk in tqdm(r.iter_content(chunk_size=8192), desc='downloading chunks'):
                 f.write(chunk)

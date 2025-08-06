@@ -2,6 +2,7 @@ import webdataset as wds
 from common.cloudflare import get_secured_urls, download_tar
 from torchvision import transforms
 import torch
+from PIL import Image
 import os
 
 class DatasetFetcher:
@@ -35,7 +36,8 @@ class DatasetFetcher:
             target_width = int(aspect_ratio[1])
             return transforms.Compose([
                 transforms.Resize((target_height, target_width)),
-                transforms.ToTensor()
+                transforms.ToTensor(),
+                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ])
             
         while True:
@@ -80,13 +82,8 @@ class DatasetFetcher:
                         self.queues[bucket] = []
                         
                         transform = get_transform(bucket)
-                        batch_images = torch.stack([transform(x[0]) for x in batch])
+                        batch_images = torch.stack([transform(x[0]) for x in batch]).to(torch.bfloat16)
                         batch_captions = [x[1] for x in batch]
-
-                        # Feature extraction (example)
-                        # features = self.model.extract_features(images)
-                        # yield features, captions
-
                         yield batch_images, batch_captions, bucket
 
             self.current_shard_index = (self.current_shard_index + 1) % self.num_shards

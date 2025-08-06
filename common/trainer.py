@@ -4,7 +4,6 @@ from common.cloudflare import get_secured_urls
 from accelerate import Accelerator
 import webdataset as wds
 from torch.utils.data import DataLoader
-from common.bucket_sampler import BucketDataset, RoundRobinMix
 from common.bucket_sampler_cache import DataExtractor, DataExtractorFeatures, BucketDatasetWithCache
 from torch.utils.tensorboard import SummaryWriter
 from webdataset.utils import pytorch_worker_info

@@ -69,10 +69,9 @@ class FeaturesExtractor:
         
         for images, captions, ratio in dataset_fetcher:
             with torch.no_grad():
-                with torch.autocast('cuda'):
-                    # extract the vae features
-                    latents = self.model.extract_latents(images)
-                    embeddings = self.model.extract_embeddings(captions)
+                # NEVER use torch autocast here as VAE will produce NaN!
+                latents = self.model.extract_latents(images.to(self.accelerator.device))
+                embeddings = self.model.extract_embeddings(captions)
 
             for i in range(batch_size):
                 sample = {
