@@ -98,6 +98,9 @@ class FeaturesExtractor:
                     upload_futures.append(future)
 
                     current_shard = current_shard + 1
+                    if current_shard >= self.shard_index_end:
+                        # this means we finished extracting the features, and most probably before the other processes
+                        break
                     current_element = 0
                     pbar.reset()
 
