@@ -4,7 +4,7 @@ from common.cloudflare import get_secured_urls
 from accelerate import Accelerator
 import webdataset as wds
 from torch.utils.data import DataLoader
-from common.bucket_sampler_cache import DataExtractor, DataExtractorFeatures, BucketDatasetWithCache
+from common.bucket_sampler import BucketSampler
 from torch.utils.tensorboard import SummaryWriter
 from webdataset.utils import pytorch_worker_info
 from torch.optim.adamw import AdamW
@@ -32,6 +32,18 @@ import io
 class Model:
     def __init__(self, params : TrainingParameters):
         self.accelerator = Accelerator(gradient_accumulation_steps=params.gradient_accumulation_steps)
+        self.params = params
+
+        self.process_index = self.accelerator.process_index
+        self.num_processes = self.accelerator.num_processes
+
+        # each gpu should have the same number of shards
+        num_shards_per_gpu = self.params.num_shards // self.num_processes
+
+        # allocate a range of shards for our process
+        self.shard_index_begin = self.process_index * num_shards_per_gpu
+        self.shard_index_end = self.shard_index_begin + num_shards_per_gpu
+        self.global_step = 0
 
     def extract_latents(self, images):
         raise NotImplemented
@@ -39,6 +51,9 @@ class Model:
     def extract_embeddings(self, captions):
         raise NotImplemented
     
+    def format_embeddings(self, embeds):
+        pass
+
     def find_closest_ratio(self, ratio):
         # find the closest ratio from the aspect ratios table
         min_distance = 100
@@ -53,90 +68,7 @@ class Model:
         return str(target_ratio)
     
     def initialize(self):
-        self.params = params
-        self.global_step = 0
-
-        if params.urls == None:
-            urls = get_secured_urls(params.r2_access_key,
-                                    params.r2_secret_key,
-                                    params.r2_endpoint,
-                                    params.r2_bucket_name,
-                                    params.r2_tar_files)
-        else:
-            urls = params.urls
-        
-        def node_no_split(src):
-            return src
-
-        def custom_handler(exn):
-            print(f"WebDataset error: {repr(exn)} -- skipping")
-            return True  # continue
-        
-        self.folders = params.urls if params.urls != None else params.r2_tar_files
-        if params.use_calculated_features == False:
-            datasets = {
-                url: wds.WebDataset(
-                    url,
-                    shardshuffle=False,
-                    handler=custom_handler,
-                    nodesplitter=node_no_split,
-                    resampled=True
-                )
-                .decode("pil")
-                .to_tuple("__key__", ["jpg", "jpeg"], "txt", handler=custom_handler)
-                for url in urls
-            }
-            self.cache_calculator = CacheFeaturesCompute(save_to_disk=params.save_to_disk)
-        else:
-            def custom_decoder(key, value):
-                if key.endswith('.npy') or key.endswith('.npz'):
-                    buffer = io.BytesIO(value)
-                    return torch.load(buffer)
-                return value
-            datasets = {url : wds.WebDataset(url, shardshuffle=False, handler=custom_handler, nodesplitter=node_no_split, resampled=True).\
-                        decode(custom_decoder).to_tuple('npy') for url in urls}
-            self.cache_calculator = CacheLoadFeatures()
-        mix = RoundRobinMix(datasets, params.dataset_seed, save_to_disk=self.params.save_to_disk, folders=self.folders)
-
-        self.mix = mix
-        self.preservation_model = None
-    
         params = self.params
-
-        if params.use_calculated_features == False:
-            self.data_extractor = DataExtractor(self.mix,
-                                                self.params.cache_size,
-                                                self.pipe,
-                                                torch.cuda.device_count(),
-                                                self.params.dataset_seed,
-                                                self.accelerator.process_index)
-            
-        else:
-            self.data_extractor = DataExtractorFeatures(self.mix,
-                                    self.params.cache_size,
-                                    self.pipe,
-                                    torch.cuda.device_count(),
-                                    self.params.dataset_seed,
-                                    self.accelerator.process_index)
-        self.dataloader_extractor = DataLoader(self.data_extractor, batch_size=1)
-        # self.dataloader_extractor = prepare_data_loader(self.dataloader_extractor,
-        #                                                 split_batches=True,
-        #                                                 dispatch_batches=True,
-        #                                                 #put_on_device=True
-        #                                                 )
-
-        self.bucket_sampler = BucketDatasetWithCache(self.params.batch_size,
-                                                     self.params.cache_size,
-                                                     self.aspect_ratios,
-                                                     self.accelerator,
-                                                     self.pipe, bucket_repeat=params.bucket_repeat)
-        self.data_extractor_iter = iter(self.dataloader_extractor)
-        
-        def collate_fn(batch):
-            return batch
-        self.dataloader_sampler = DataLoader(self.bucket_sampler, batch_size=None, collate_fn=collate_fn)
-        self.dataloader_sampler = self.accelerator.prepare_data_loader(self.dataloader_sampler)
-
         if self.accelerator.is_main_process:
             self.logger = SummaryWriter()
 
@@ -144,14 +76,19 @@ class Model:
             os.makedirs('models', exist_ok=True)
         else:
             self.logger = None
+        shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
+        self.sampler = BucketSampler(shards,
+                        params.r2_dataset_folder,
+                        self.accelerator,
+                        params.batch_size,
+                        params.r2_access_key,
+                        params.r2_secret_key,
+                        params.r2_endpoint,
+                        params.r2_bucket_name)
+        #self.sampler = self.accelerator.prepare(self.sampler)
         
-        if params.use_preservation:
-            self.preservation_model = deepcopy(self.model)
-            self.preservation_model.train(False)
-            self.preservation_model = self.accelerator.prepare(self.preservation_model)
-    
         # check for lora training
-        if params.lora_rank != None:
+        if self.params.lora_rank != None:
             dtype = self.model.dtype
             device = self.model.device
             if self.params.lora_pretrained == None:
@@ -177,19 +114,13 @@ class Model:
                 self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True)
                 self.model.print_trainable_parameters()
 
-        if self.params.bfloat16:
-            self.model = self.model.to(dtype=torch.bfloat16)
         params_to_optimizer = self.model.parameters()
-
-        self.optimizer = bnb.optim.AdamW8bit(params_to_optimizer,
+        self.optimizer = torch.optim.AdamW(params_to_optimizer,
                                             lr=params.learning_rate,
                                             weight_decay=params.weight_decay)
         self.optimizer = self.accelerator.prepare(self.optimizer)
-        # else:
-        #     self.optimizer = AdamW(params_to_optimizer,
-        #                            lr=params.learning_rate,
-        #                            weight_decay=params.weight_decay)
-        
+        #self.model = self.accelerator.prepare(self.model)
+
         self.lr_scheduler = None
         if params.cyclic_lr_max_lr != None:
             self.lr_scheduler = CyclicLR(optimizer=self.optimizer,
@@ -217,7 +148,7 @@ class Model:
     def validate(self):
         raise NotImplemented
 
-    def optimize(self, batch, model):
+    def optimize(self, latents, embeddings):
         raise NotImplemented
 
     def finalize(self):
@@ -225,37 +156,6 @@ class Model:
 
     def save_model(self):
         self.model.save_pretrained(f'models/{self.global_step}')
-
-    def cache_latents_embeddings(self, img, caption, cache_idx, save_img=False):
-        img = torch.squeeze(img)
-
-        # find the aspect ratio
-        width = img.shape[-1]
-        height = img.shape[-2]
-        ratio = height / width
-        closest_ratio = self.find_closest_ratio(ratio)
-        height_target = int(self.aspect_ratios[closest_ratio][0])
-        width_target = int(self.aspect_ratios[closest_ratio][1])
-
-        # resize the image
-        resize_transform = Resize((height_target, width_target))
-        img = resize_transform(img.cpu())
-
-        # compute the latents and embeddings
-        with torch.no_grad():
-            latent = self.extract_latents(img.to(self.accelerator.device))
-            embedding = self.extract_embeddings(caption)
-
-        # save on the disk
-        embedding = embedding.cpu()
-        img.cpu()
-        if save_img == False:
-            img = None
-        to_save = (closest_ratio, img, latent.cpu(), embedding)
-        torch.save(to_save, f'cache/{cache_idx}.npy')
-
-        # return the tensor in case we save to disk
-        return to_save
     
     def run(self):
         params = self.params
@@ -265,13 +165,8 @@ class Model:
         avg_loss = torch.tensor(0, device=self.accelerator.device)
 
         while self.global_step < self.params.steps:
-            self.cache_calculator.run(self)
-                
             # then go through the cache items
-            for batch in self.dataloader_sampler:
-                # in the case you need to start caching new elements
-                if isinstance(batch, list) == False:
-                    break
+            for latents, embeddings in self.sampler:
                 if self.global_step % params.num_steps_per_validation == 0:
                     with torch.no_grad():
                         # ✅ Run reduction on ALL processes to sync EMA parameters
@@ -289,49 +184,43 @@ class Model:
                             self.save_model()
                 
                             if self.ema_model != None:
-                                self.ema_model.restore(self.model.parameters())  # ✅ Now restore works!
-
-                for elem in batch:
-                    elem = elem.to(device=self.accelerator.device)
-                    if self.params.bfloat16:
-                        elem = elem.to(dtype=torch.bfloat16)
+                                self.ema_model.restore(self.model.parameters())
+                    self.accelerator.wait_for_everyone()
                 
                 with self.accelerator.accumulate(self.model):
-                    loss = self.optimize(self.model, batch)
-                    if self.preservation_model != None:
-                        loss = loss + self.params.preservation_ratio * self.optimize(self.preservation_model, batch)
+                    loss = self.optimize(latents, embeddings)
                     
-                    # check if we are using repa
-                    if self.params.use_repa:
-                        self.repa_model.to(self.accelerator.device)
-                        images = batch[0]
-                        # extract the features with dino_v2 of the clean image in the spatial space
-                        with torch.no_grad():
-                            inputs = self.repa_processor(images=images.to(torch.float32), return_tensors="pt")
-                            inputs = inputs['pixel_values'].to(self.accelerator.device, dtype=torch.bfloat16)
-                            outputs = self.repa_model(inputs)
-                        last_hidden_states = outputs.last_hidden_state
-                        last_hidden_states = last_hidden_states.to(torch.bfloat16)
+                    # # check if we are using repa
+                    # if self.params.use_repa:
+                    #     self.repa_model.to(self.accelerator.device)
+                    #     images = batch[0]
+                    #     # extract the features with dino_v2 of the clean image in the spatial space
+                    #     with torch.no_grad():
+                    #         inputs = self.repa_processor(images=images.to(torch.float32), return_tensors="pt")
+                    #         inputs = inputs['pixel_values'].to(self.accelerator.device, dtype=torch.bfloat16)
+                    #         outputs = self.repa_model(inputs)
+                    #     last_hidden_states = outputs.last_hidden_state
+                    #     last_hidden_states = last_hidden_states.to(torch.bfloat16)
 
-                        # https://github.com/sihyun-yu/REPA/blob/main/loss.py#L78
-                        repa_projection = self.model.repa_proj
-                        def mean_flat(x):
-                            """
-                            Take the mean over all non-batch dimensions.
-                            """
-                            return torch.mean(x, dim=list(range(1, len(x.size()))))
+                    #     # https://github.com/sihyun-yu/REPA/blob/main/loss.py#L78
+                    #     repa_projection = self.model.repa_proj
+                    #     def mean_flat(x):
+                    #         """
+                    #         Take the mean over all non-batch dimensions.
+                    #         """
+                    #         return torch.mean(x, dim=list(range(1, len(x.size()))))
                         
-                        proj_loss = 0
-                        num_items = 0
-                        for i, (z, z_tilde) in enumerate(zip(last_hidden_states, repa_projection)):
-                            for j, (z_j, z_tilde_j) in enumerate(zip(z, z_tilde)):
-                                z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1) 
-                                z_j = torch.nn.functional.normalize(z_j, dim=-1) 
-                                proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
-                                num_items = num_items + 1
+                    #     proj_loss = 0
+                    #     num_items = 0
+                    #     for i, (z, z_tilde) in enumerate(zip(last_hidden_states, repa_projection)):
+                    #         for j, (z_j, z_tilde_j) in enumerate(zip(z, z_tilde)):
+                    #             z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1) 
+                    #             z_j = torch.nn.functional.normalize(z_j, dim=-1) 
+                    #             proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
+                    #             num_items = num_items + 1
 
-                        proj_loss = proj_loss / (len(last_hidden_states) * params.batch_size)
-                        loss = loss + params.repa_lambda * proj_loss
+                    #     proj_loss = proj_loss / (len(last_hidden_states) * params.batch_size)
+                    #     loss = loss + params.repa_lambda * proj_loss
 
                     avg_loss = avg_loss + loss
                     self.accelerator.backward(loss)
@@ -357,13 +246,5 @@ class Model:
                             self.logger.add_scalar('train/lr', last_lr[0], self.global_step)
                     progress_bar.update(1)
                 self.global_step = self.global_step + 1
-            
-            # delete the cache
-            if self.accelerator.is_main_process:
-                if os.path.exists('cache'):
-                    shutil.rmtree('cache')
-                os.makedirs('cache', exist_ok=True)
-            
-            if hasattr(self, 'repa_model'):
-                self.repa_model.cpu()
-            self.accelerator.wait_for_everyone()
+            # if hasattr(self, 'repa_model'):
+            #     self.repa_model.cpu()

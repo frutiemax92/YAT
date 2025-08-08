@@ -72,7 +72,7 @@ class FeaturesExtractor:
                 # NEVER use torch autocast here as VAE will produce NaN!
                 latents = self.model.extract_latents(images.to(self.accelerator.device))
                 embeddings = self.model.extract_embeddings(captions)
-
+                
             for i in range(batch_size):
                 sample = {
                     "__key__": f'{current_element:07d}',

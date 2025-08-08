@@ -51,10 +51,15 @@ class SanaModel(Model):
         #self.pipe = self.pipe.to(self.accelerator.device)
         self.pipe.transformer = self.model
         transformer = self.pipe.transformer
+        vae = self.pipe.vae
+        text_encoder = self.pipe.text_encoder
         
         transformer = transformer.to(self.accelerator.device)
-        vae = vae.to(self.accelerator.device)
-        text_encoder = text_encoder.to(self.accelerator.device)
+        vae.cpu()
+        text_encoder.cpu()
+    
+    def format_embeddings(self, embeds):
+        pass
     
     def extract_latents(self, images):
         output = self.pipe.vae.encode(images.to(dtype=self.pipe.vae.dtype)).latent
@@ -62,7 +67,7 @@ class SanaModel(Model):
 
     def extract_embeddings(self, captions):
         # move text_encoder to cuda if not already done
-        #self.pipe.text_encoder = self.pipe.text_encoder.to(device=self.accelerator.device)
+        self.pipe.text_encoder = self.pipe.text_encoder.to(device=self.accelerator.device)
         
         prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
         self.pipe.encode_prompt(captions,
@@ -151,44 +156,49 @@ class SanaModel(Model):
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image[0]), self.global_step)
             idx = idx + 1
         
-        self.pipe.transformer = transformer
-        self.pipe.vae = vae
+        self.pipe.vae.cpu()
         self.pipe.text_encoder = text_encoder
-        self.pipe.to(dtype=torch.bfloat16)
+        self.pipe.transformer = transformer
+        self.pipe.transformer.to(dtype=torch.bfloat16, device=self.accelerator.device)
     
-    def optimize(self, model, batch):
-        if self.pipe.vae.device != 'cpu':
-            self.pipe.vae = self.pipe.vae.cpu()
-            self.pipe.text_encoder = self.pipe.text_encoder.cpu()
-            torch.cuda.empty_cache()
-        transformer = self.pipe.transformer.to(self.accelerator.device)
-        
+    def optimize(self, latents, embeddings):
         params = self.params
         batch_size = params.batch_size
-        _, latents, embeddings, attention_mask = batch
+
+        # pad the embeds to 512 tokens and generate the corresponding mask
+        padded_embeds = []
+        masks = []
+        for emb in embeddings:
+            padded_emb = torch.nn.functional.pad(emb, pad=(0, 0, 0, 512 - emb.shape[0]), mode='constant', value=0)
+            mask = torch.zeros(512, dtype=torch.long, device=emb.device)
+            mask[:emb.shape[0]] = 1
+            masks.append(mask)
+            padded_embeds.append(padded_emb)
+        
+        # Move everything to device and correct dtype
+        attention_mask = torch.stack(masks).to(device=self.accelerator.device)
+        embeddings = torch.stack(padded_embeds).to(device=self.accelerator.device, dtype=torch.bfloat16)
+        latents = latents.to(device=self.accelerator.device, dtype=torch.bfloat16)
 
         loss_fn = torch.nn.MSELoss()
-        noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=self.pipe.dtype)
+        noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=torch.bfloat16)
 
         u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=1.29)
         indices = (u * self.scheduler.config.num_train_timesteps).long()
         timesteps = self.scheduler.timesteps[indices].to(self.accelerator.device)
-        noisy_model_input = self.scheduler.scale_noise(latents.to(self.accelerator.device), timesteps, noise)
+        noisy_model_input = self.scheduler.scale_noise(latents, timesteps, noise)
 
-        transformer = model
-
-        if self.params.batch_size == 1:
-            noisy_model_input = noisy_model_input.unsqueeze(0)
-            embeddings = embeddings.unsqueeze(0)
-            attention_mask = attention_mask.unsqueeze(0)
-
-        noise_pred = transformer(noisy_model_input.to(dtype=self.pipe.vae.dtype),
-                                encoder_hidden_states=embeddings.to(dtype=self.pipe.vae.dtype),
-                                timestep=timesteps.to(dtype=self.pipe.vae.dtype),
-                                encoder_attention_mask=attention_mask.to(dtype=self.pipe.vae.dtype)).sample
+        # Keep everything in bfloat16
+        noise_pred = self.model(
+            noisy_model_input,
+            encoder_hidden_states=embeddings,
+            timestep=timesteps,
+            encoder_attention_mask=attention_mask
+        ).sample
+        
         target = noise - latents
-        loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
-        return loss
+        loss = loss_fn(noise_pred.float(), target.float())
+        return loss  # Already in bfloat16 since inputs were bfloat16
         
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
