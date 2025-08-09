@@ -64,8 +64,11 @@ class BucketSampler:
                 res = r
         return res
     
+    def get_next_shard_index(self):
+        return random.randint(0, len(self.shards))
+    
     def __iter__(self):
-        current_shard_index = 0
+        current_shard_index = self.get_next_shard_index()
         sync_counter = 0
     
         def pt_decoder(key, value):
@@ -86,7 +89,7 @@ class BucketSampler:
             try:
                 download_tar(dataset_url, local_shard_path)
             except:
-                current_shard_index = (current_shard_index + 1) % len(self.shards)
+                current_shard_index = self.get_next_shard_index()
                 continue
 
             dataset = (
@@ -147,5 +150,5 @@ class BucketSampler:
             # Clean up at end of shard
             if os.path.exists(local_shard_path):
                 os.remove(local_shard_path)
-            current_shard_index = (current_shard_index + 1) % len(self.shards)
+            current_shard_index = self.get_next_shard_index()
             self.accelerator.wait_for_everyone()
