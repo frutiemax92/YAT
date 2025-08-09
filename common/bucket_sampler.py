@@ -87,7 +87,7 @@ class BucketSampler:
                                             [self.features_path + '/' + self.shards[current_shard_index]]
                                            )[0]
             local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}.tar'
-
+            print(f'proc:{self.process_index} before download')
             try:
                 download_tar(dataset_url, local_shard_path)
             except:
@@ -100,7 +100,9 @@ class BucketSampler:
                 .to_tuple('ratio', 'latent.pt', 'emb.pt')
             )
 
-            self.accelerator.wait_for_everyone()
+            
+            #self.accelerator.wait_for_everyone()
+            print(f'proc:{self.process_index} after wait')
             for ratio, latent, emb in dataset:
                 ratio = float(ratio)
                 if not ratio in self.buckets.keys():
@@ -153,4 +155,3 @@ class BucketSampler:
             if os.path.exists(local_shard_path):
                 os.remove(local_shard_path)
             current_shard_index = self.get_next_shard_index()
-            self.accelerator.wait_for_everyone()
