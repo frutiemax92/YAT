@@ -51,6 +51,8 @@ class BucketSampler:
         self.local_temp_dir = local_temp_dir
         self.features_path = features_path
 
+        os.makedirs(self.local_temp_dir, exist_ok=True)
+
     def add_bucket(self, ratio):
         self.buckets[ratio] = deque(maxlen=self.batch_size)
 
