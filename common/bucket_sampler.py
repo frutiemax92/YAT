@@ -65,7 +65,7 @@ class BucketSampler:
         return res
     
     def get_next_shard_index(self):
-        return random.randint(0, len(self.shards))
+        return random.randint(0, len(self.shards) - 1)
     
     def __iter__(self):
         current_shard_index = self.get_next_shard_index()
