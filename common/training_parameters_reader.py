@@ -110,6 +110,10 @@ class TrainingParameters:
         if 'use_ema' in yaml_root.keys():
             self.use_ema = True
         
+        # train using unconditional steps probability
+        self.train_unconditional_prob = 0.0
+        if 'train_unconditional_prob' in yaml_root.keys():
+            self.train_unconditional_prob = float(yaml_root['train_unconditional_prob'])
         # learning rate scheduler
         if 'cyclic_lr_max_lr' in yaml_root.keys():
             self.cyclic_lr_max_lr = float(yaml_root['cyclic_lr_max_lr'])

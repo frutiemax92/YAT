@@ -25,6 +25,7 @@ import PIL
 from diffusers.training_utils import EMAModel
 from common.cache import CacheFeaturesCompute, CacheLoadFeatures
 from transformers import AutoImageProcessor, AutoModel
+import random
 import io
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
@@ -188,6 +189,12 @@ class Model:
                     self.accelerator.wait_for_everyone()
                 
                 with self.accelerator.accumulate(self.model):
+                    # randomly train with the unconditional embedding
+                    prob = random.random()
+                    if prob < self.params.train_unconditional_prob:
+                        # put the embeddings to the empty one
+                        for idx in range(len(embeddings)):
+                            embeddings[idx] = self.empty_embeddings[0]
                     loss = self.optimize(latents, embeddings)
                     
                     # # check if we are using repa
