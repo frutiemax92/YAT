@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from typing import Any, Dict, Optional, Tuple, Union
+from utils.patch_sana_attention_layers import PatchedSanaTransformerBlock, patch_sana_attention_layers
 
 import torch
 import torch.nn.functional as F
@@ -30,263 +31,10 @@ from diffusers.models.embeddings import PatchEmbed, PixArtAlphaTextProjection, T
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.normalization import AdaLayerNormSingle, RMSNorm
+from diffusers.models.transformers.sana_transformer import SanaTransformerBlock, SanaCombinedTimestepGuidanceEmbeddings, SanaModulatedNorm
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
-
-
-class GLUMBConv(nn.Module):
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        expand_ratio: float = 4,
-        norm_type: Optional[str] = None,
-        residual_connection: bool = True,
-    ) -> None:
-        super().__init__()
-
-        hidden_channels = int(expand_ratio * in_channels)
-        self.norm_type = norm_type
-        self.residual_connection = residual_connection
-
-        self.nonlinearity = nn.SiLU()
-        self.conv_inverted = nn.Conv2d(in_channels, hidden_channels * 2, 1, 1, 0)
-        self.conv_depth = nn.Conv2d(hidden_channels * 2, hidden_channels * 2, 3, 1, 1, groups=hidden_channels * 2)
-        self.conv_point = nn.Conv2d(hidden_channels, out_channels, 1, 1, 0, bias=False)
-
-        self.norm = None
-        if norm_type == "rms_norm":
-            self.norm = RMSNorm(out_channels, eps=1e-5, elementwise_affine=True, bias=True)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.residual_connection:
-            residual = hidden_states
-
-        hidden_states = self.conv_inverted(hidden_states)
-        hidden_states = self.nonlinearity(hidden_states)
-
-        hidden_states = self.conv_depth(hidden_states)
-        hidden_states, gate = torch.chunk(hidden_states, 2, dim=1)
-        hidden_states = hidden_states * self.nonlinearity(gate)
-
-        hidden_states = self.conv_point(hidden_states)
-
-        if self.norm_type == "rms_norm":
-            # move channel to the last dimension so we apply RMSnorm across channel dimension
-            hidden_states = self.norm(hidden_states.movedim(1, -1)).movedim(-1, 1)
-
-        if self.residual_connection:
-            hidden_states = hidden_states + residual
-
-        return hidden_states
-
-
-class SanaModulatedNorm(nn.Module):
-    def __init__(self, dim: int, elementwise_affine: bool = False, eps: float = 1e-6):
-        super().__init__()
-        self.norm = nn.LayerNorm(dim, elementwise_affine=elementwise_affine, eps=eps)
-
-    def forward(
-        self, hidden_states: torch.Tensor, temb: torch.Tensor, scale_shift_table: torch.Tensor
-    ) -> torch.Tensor:
-        hidden_states = self.norm(hidden_states)
-        shift, scale = (scale_shift_table[None] + temb[:, None].to(scale_shift_table.device)).chunk(2, dim=1)
-        hidden_states = hidden_states * (1 + scale) + shift
-        return hidden_states
-
-
-class SanaCombinedTimestepGuidanceEmbeddings(nn.Module):
-    def __init__(self, embedding_dim):
-        super().__init__()
-        self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0)
-        self.timestep_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=embedding_dim)
-
-        self.guidance_condition_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0)
-        self.guidance_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=embedding_dim)
-
-        self.silu = nn.SiLU()
-        self.linear = nn.Linear(embedding_dim, 6 * embedding_dim, bias=True)
-
-    def forward(self, timestep: torch.Tensor, guidance: torch.Tensor = None, hidden_dtype: torch.dtype = None):
-        timesteps_proj = self.time_proj(timestep)
-        timesteps_emb = self.timestep_embedder(timesteps_proj.to(dtype=hidden_dtype))  # (N, D)
-
-        guidance_proj = self.guidance_condition_proj(guidance)
-        guidance_emb = self.guidance_embedder(guidance_proj.to(dtype=hidden_dtype))
-        conditioning = timesteps_emb + guidance_emb
-
-        return self.linear(self.silu(conditioning)), conditioning
-
-
-class SanaAttnProcessor2_0:
-    r"""
-    Processor for implementing scaled dot-product attention (enabled by default if you're using PyTorch 2.0).
-    """
-
-    def __init__(self):
-        if not hasattr(F, "scaled_dot_product_attention"):
-            raise ImportError("SanaAttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0.")
-
-    def __call__(
-        self,
-        attn: Attention,
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        batch_size, sequence_length, _ = (
-            hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
-        )
-
-        if attention_mask is not None:
-            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
-            # scaled_dot_product_attention expects attention_mask shape to be
-            # (batch, heads, source_length, target_length)
-            attention_mask = attention_mask.view(batch_size, attn.heads, -1, attention_mask.shape[-1])
-
-        query = attn.to_q(hidden_states)
-
-        if encoder_hidden_states is None:
-            encoder_hidden_states = hidden_states
-
-        key = attn.to_k(encoder_hidden_states)
-        value = attn.to_v(encoder_hidden_states)
-
-        if attn.norm_q is not None:
-            query = attn.norm_q(query)
-        if attn.norm_k is not None:
-            key = attn.norm_k(key)
-
-        inner_dim = key.shape[-1]
-        head_dim = inner_dim // attn.heads
-
-        query = query.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-        key = key.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-        value = value.view(batch_size, -1, attn.heads, head_dim).transpose(1, 2)
-
-        # the output of sdp = (batch, num_heads, seq_len, head_dim)
-        # TODO: add support for attn.scale when we move to Torch 2.1
-        hidden_states = F.scaled_dot_product_attention(
-            query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
-        )
-
-        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
-        hidden_states = hidden_states.to(query.dtype)
-
-        # linear proj
-        hidden_states = attn.to_out[0](hidden_states)
-        # dropout
-        hidden_states = attn.to_out[1](hidden_states)
-
-        hidden_states = hidden_states / attn.rescale_output_factor
-
-        return hidden_states
-
-
-class SanaTransformerBlock(nn.Module):
-    r"""
-    Transformer block introduced in [Sana](https://huggingface.co/papers/2410.10629).
-    """
-
-    def __init__(
-        self,
-        dim: int = 2240,
-        num_attention_heads: int = 70,
-        attention_head_dim: int = 32,
-        dropout: float = 0.0,
-        num_cross_attention_heads: Optional[int] = 20,
-        cross_attention_head_dim: Optional[int] = 112,
-        cross_attention_dim: Optional[int] = 2240,
-        attention_bias: bool = True,
-        norm_elementwise_affine: bool = False,
-        norm_eps: float = 1e-6,
-        attention_out_bias: bool = True,
-        mlp_ratio: float = 2.5,
-        qk_norm: Optional[str] = None,
-    ) -> None:
-        super().__init__()
-
-        # 1. Self Attention
-        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=norm_eps)
-        self.attn1 = Attention(
-            query_dim=dim,
-            heads=num_attention_heads,
-            dim_head=attention_head_dim,
-            kv_heads=num_attention_heads if qk_norm is not None else None,
-            qk_norm=qk_norm,
-            dropout=dropout,
-            bias=attention_bias,
-            cross_attention_dim=None,
-            #processor=SanaLinearAttnProcessor2_0(),
-        )
-
-        # 2. Cross Attention
-        if cross_attention_dim is not None:
-            self.norm2 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
-            self.attn2 = Attention(
-                query_dim=dim,
-                qk_norm=qk_norm,
-                kv_heads=num_cross_attention_heads if qk_norm is not None else None,
-                cross_attention_dim=cross_attention_dim,
-                heads=num_cross_attention_heads,
-                dim_head=cross_attention_head_dim,
-                dropout=dropout,
-                bias=True,
-                out_bias=attention_out_bias,
-                #processor=SanaAttnProcessor2_0(),
-            )
-
-        # 3. Feed-forward
-        self.ff = GLUMBConv(dim, dim, mlp_ratio, norm_type=None, residual_connection=False)
-
-        self.scale_shift_table = nn.Parameter(torch.randn(6, dim) / dim**0.5)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        encoder_hidden_states: Optional[torch.Tensor] = None,
-        encoder_attention_mask: Optional[torch.Tensor] = None,
-        timestep: Optional[torch.LongTensor] = None,
-        height: int = None,
-        width: int = None,
-    ) -> torch.Tensor:
-        batch_size = hidden_states.shape[0]
-
-        # 1. Modulation
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            self.scale_shift_table[None] + timestep.reshape(batch_size, 6, -1)
-        ).chunk(6, dim=1)
-
-        # 2. Self Attention
-        norm_hidden_states = self.norm1(hidden_states)
-        norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
-        norm_hidden_states = norm_hidden_states.to(hidden_states.dtype)
-
-        attn_output = self.attn1(norm_hidden_states)
-        hidden_states = hidden_states + gate_msa * attn_output
-
-        # 3. Cross Attention
-        if self.attn2 is not None:
-            attn_output = self.attn2(
-                hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                attention_mask=encoder_attention_mask,
-            )
-            hidden_states = attn_output + hidden_states
-
-        # 4. Feed-forward
-        norm_hidden_states = self.norm2(hidden_states)
-        norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
-
-        norm_hidden_states = norm_hidden_states.unflatten(1, (height, width)).permute(0, 3, 1, 2)
-        ff_output = self.ff(norm_hidden_states)
-        ff_output = ff_output.flatten(2, 3).permute(0, 2, 1)
-        hidden_states = hidden_states + gate_mlp * ff_output
-
-        return hidden_states
 
 
 class PatchedSanaTransformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin):
@@ -360,6 +108,7 @@ class PatchedSanaTransformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, F
         guidance_embeds_scale: float = 0.1,
         qk_norm: Optional[str] = None,
         timestep_scale: float = 1.0,
+        modified_blocks: Optional[int] = []
     ) -> None:
         super().__init__()
 
@@ -406,6 +155,9 @@ class PatchedSanaTransformer2DModel(ModelMixin, ConfigMixin, PeftAdapterMixin, F
                 for _ in range(num_layers)
             ]
         )
+
+        # patch the blocks
+        patch_sana_attention_layers(self, modified_blocks)
 
         # 4. Output blocks
         self.scale_shift_table = nn.Parameter(torch.randn(2, inner_dim) / inner_dim**0.5)
