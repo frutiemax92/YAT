@@ -118,9 +118,6 @@ class BucketSampler:
                     if len(self.buckets[r]) >= self.batch_size:
                         self.valid_buckets.add(r)
                 
-                if not self.valid_buckets:
-                    continue
-                
                 bucket_list = list(self.valid_buckets)
                 max_buckets = 100
                 bucket_list = bucket_list[:max_buckets] + [-1.0] * (max_buckets - len(bucket_list))
