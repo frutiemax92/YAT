@@ -113,6 +113,14 @@ class PatchedSanaTransformerBlock(nn.Module):
 
         return hidden_states
 
+def freeze_sana_blocks(transformer, layers : list[int]):
+    for param in transformer.parameters():
+        param.requires_grad = False
+    for idx in layers:
+        block = transformer.transformer_blocks[idx]
+        for param in block.parameters():
+            param.requires_grad = False
+
 def patch_sana_attention_layers(transformer, layers : list[int]):
     inner_dim = transformer.config.num_attention_heads * transformer.config.attention_head_dim
     num_attention_heads = transformer.config.num_attention_heads
@@ -151,6 +159,11 @@ def patch_sana_attention_layers(transformer, layers : list[int]):
             param.requires_grad = True
 
         transformer.transformer_blocks[idx] = patched_block
-    transformer.register_to_config(modified_blocks = layers)
+    
+    modified_blocks = transformer.config.modified_blocks
+    for l in layers:
+        if not l in modified_blocks:
+            modified_blocks.append(l)
+    transformer.register_to_config(modified_blocks = modified_blocks)
 
 
