@@ -8,6 +8,7 @@ from diffusers.models.attention_processor import (
 )
 from diffusers.models.attention_processor import AttnProcessor
 from diffusers.models.transformers.sana_transformer import GLUMBConv
+from diffusers.models.attention_processor import AttnProcessor2_0
 import torch
 
 class PatchedSanaTransformerBlock(nn.Module):
@@ -122,43 +123,20 @@ def unfreeze_sana_blocks(transformer, layers : list[int]):
             param.requires_grad = True
 
 def patch_sana_attention_layers(transformer, layers : list[int]):
-    inner_dim = transformer.config.num_attention_heads * transformer.config.attention_head_dim
-    num_attention_heads = transformer.config.num_attention_heads
-    attention_head_dim = transformer.config.attention_head_dim
-    dropout = transformer.config.dropout
-    num_cross_attention_heads = transformer.config.num_cross_attention_heads
-    cross_attention_head_dim = transformer.config.cross_attention_head_dim
-    cross_attention_dim = transformer.config.cross_attention_dim
-    attention_bias = transformer.config.attention_bias
-    norm_elementwise_affine = transformer.config.norm_elementwise_affine
-    norm_eps = transformer.config.norm_eps
-    mlp_ratio = transformer.config.mlp_ratio
-    qk_norm = transformer.config.qk_norm
-
     # freeze the whole model first
     for param in transformer.parameters():
         param.requires_grad = False
 
     for idx in layers:
-        patched_block = PatchedSanaTransformerBlock(
-                    inner_dim,
-                    num_attention_heads,
-                    attention_head_dim,
-                    dropout=dropout,
-                    num_cross_attention_heads=num_cross_attention_heads,
-                    cross_attention_head_dim=cross_attention_head_dim,
-                    cross_attention_dim=cross_attention_dim,
-                    attention_bias=attention_bias,
-                    norm_elementwise_affine=norm_elementwise_affine,
-                    norm_eps=norm_eps,
-                    mlp_ratio=mlp_ratio,
-                    qk_norm=qk_norm)
+        block = transformer.transformer_blocks[idx]
+        block.attn1.set_processor(AttnProcessor2_0())
+        block.attn2.set_processor(AttnProcessor2_0())
         
         # Unfreeze the new block
-        for param in patched_block.parameters():
+        for param in block.parameters():
             param.requires_grad = True
 
-        transformer.transformer_blocks[idx] = patched_block
+        transformer.transformer_blocks[idx] = block
     
     modified_blocks = transformer.config.modified_blocks
     for l in layers:
