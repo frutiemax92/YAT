@@ -7,6 +7,7 @@ import webdataset as wds
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 import os
+from huggingface_hub import list_repo_files, hf_hub_download, hf_hub_url
 
 def generate_shards(params : TrainingParameters, 
                     local_temp_dir = 'temp'):
@@ -17,7 +18,13 @@ def generate_shards(params : TrainingParameters,
     current_element = 0
     shard_size = int(params.r2_upload_shard_size)
     upload_key = params.r2_upload_key
-    urls = params.r2_tar_files
+
+    if params.huggingface_dataset_repo != None:
+        files = list_repo_files(params.huggingface_dataset_repo, repo_type="dataset")
+        files = [f for f in files if f.endswith(".tar") or f.endswith(".zip") or f.endswith(".txt") or f.endswith(".jpg")]
+        urls = [hf_hub_url(params.huggingface_dataset_repo, filename, repo_type='dataset') for filename in files]
+    else:
+        urls = params.r2_tar_files
     executor = ThreadPoolExecutor(max_workers=2)
     upload_futures = []
 
@@ -25,10 +32,13 @@ def generate_shards(params : TrainingParameters,
     shard_filename = f"shard-{current_shard:06d}.tar"
     local_path = os.path.join(local_temp_dir, shard_filename)
     remote_key = f'{upload_key}/{shard_filename}'
-    writer = wds.ShardWriter(shard_template, maxcount=shard_size)
+    writer = wds.ShardWriter(shard_template, maxcount=shard_size, maxsize=100e9)
     
     for url in tqdm(urls, desc='iterating through urls'):
-        next_url = get_secured_urls(params.r2_access_key, params.r2_secret_key, params.r2_endpoint, params.r2_bucket_name, [url])
+        if params.huggingface_dataset_repo == None:
+            next_url = get_secured_urls(params.r2_access_key, params.r2_secret_key, params.r2_endpoint, params.r2_bucket_name, [url])
+        else:
+            next_url = url
         session = boto3.Session(
             aws_access_key_id=params.r2_access_key,
             aws_secret_access_key=params.r2_secret_key

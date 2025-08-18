@@ -128,6 +128,10 @@ class TrainingParameters:
             if 'cylic_lr_mode' in yaml_root.keys():
                 self.cylic_lr_mode = yaml_root['cylic_lr_mode']
         
+        self.huggingface_dataset_repo = None
+        if 'huggingface_dataset_repo' in yaml_root.keys():
+            self.huggingface_dataset_repo = yaml_root['huggingface_dataset_repo']
+            
         # lora training
         if 'lora_rank' in yaml_root.keys():
             if 'lora_pretrained' in yaml_root.keys():

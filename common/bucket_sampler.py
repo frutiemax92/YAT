@@ -76,7 +76,7 @@ class BucketSampler:
         def pt_decoder(key, value):
             if key.endswith(".pt"):
                 # Load the tensor from the bytes object
-                return torch.load(io.BytesIO(value), map_location=self.accelerator.device)
+                return torch.load(io.BytesIO(value), map_location="cpu")
             else:
                 return value.decode('utf-8')
         while True:
