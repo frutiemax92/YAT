@@ -70,9 +70,13 @@ def generate_shards(params : TrainingParameters,
         img_url = img_urls[idx]
         img_dataset = wds.WebDataset(img_url).decode()
         for elem in tqdm(img_dataset, desc='iterating through images'):
-            new_key = elem['__key__']
-            caption = captions[new_key]
-            img = elem['jpg']
+            try:
+                new_key = elem['__key__']
+                caption = captions[new_key]
+                img = elem['jpg']
+            except:
+                print('skipping bad element!')
+                continue
             
             # testing
             #image = Image.open(io.BytesIO(img))
