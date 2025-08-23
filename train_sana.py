@@ -4,6 +4,7 @@ from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_
 from diffusers import SanaTransformer2DModel, FlowMatchEulerDiscreteScheduler
 from diffusers.training_utils import compute_density_for_timestep_sampling
 from diffusers import SanaPipeline, SanaPAGPipeline, AutoencoderDC
+from utils.patched_sana_transformer import PatchedSanaTransformer2DModel, patch_sana_attention_layers
 import torch
 import tqdm
 from torchvision.transforms import PILToTensor
@@ -15,8 +16,7 @@ from common.features_extractor import FeaturesExtractor
 class SanaModel(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
-        self.pipe = SanaPAGPipeline.from_pretrained(params.pretrained_pipe_path, 
-                                                    pag_applied_layers="transformer_blocks.8")
+        self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path)
         if params.pretrained_model_path != None:
             transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path) 
             self.pipe.transformer = transformer
@@ -45,6 +45,11 @@ class SanaModel(Model):
 
         self.model = self.pipe.transformer
         self.model.enable_gradient_checkpointing()
+    
+    def patch(self):
+        self.pipe.transformer = PatchedSanaTransformer2DModel.from_pretrained(self.params.pretrained_model_path)
+        depth = self.pipe.transformer.config.num_layers
+        patch_sana_attention_layers(self.pipe.transformer, [i for i in range(depth)])
     
     def initialize(self):
         super().initialize()
@@ -135,7 +140,6 @@ class SanaModel(Model):
                 prompt_attention_mask=prompt_attention_mask,
                 negative_prompt_embeds=negative_prompt_embeds,
                 negative_prompt_attention_mask=negative_prompt_attention_mask,
-                pag_scale=2.0,
                 guidance_scale=5.0,
                 num_inference_steps=20,
                 generator=generator,
