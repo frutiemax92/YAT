@@ -11,6 +11,7 @@ from torchvision import transforms
 from concurrent.futures import ThreadPoolExecutor
 from common.dataset_fetcher import DatasetFetcher
 from common.cloudflare import get_client
+import time
 import io
 
 class FeaturesExtractor:
@@ -30,7 +31,7 @@ class FeaturesExtractor:
         self.shard_index_begin = self.process_index * num_shards_per_gpu
         self.shard_index_end = self.shard_index_begin + num_shards_per_gpu
 
-    def run(self, local_temp_dir = 'temp'):
+    def run(self, local_temp_dir = 'temp', max_pending_uploads=4):
         # build the webdataset from the shard range
         shards = [(shard_index, f'{self.params.r2_dataset_folder}/shard-{shard_index:06d}.tar') for shard_index in range(self.shard_index_begin, self.shard_index_end)]
         batch_size = self.params.batch_size
@@ -96,6 +97,21 @@ class FeaturesExtractor:
                         remote_key
                     )
                     upload_futures.append(future)
+
+                    # stall if too many uploads are pending
+                    while len(upload_futures) >= max_pending_uploads:
+                        # wait for at least one upload to finish
+                        done, not_done = [], []
+                        for f in upload_futures:
+                            if f.done():
+                                done.append(f)
+                            else:
+                                not_done.append(f)
+                        for f in done:
+                            f.result()  # raise exceptions if any
+                        upload_futures = not_done
+                        if len(upload_futures) >= max_pending_uploads:
+                            time.sleep(1)  # avoid busy spin
 
                     current_shard = current_shard + 1
                     if current_shard >= self.shard_index_end:
