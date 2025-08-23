@@ -4,7 +4,7 @@ from common.cloudflare import get_secured_urls
 from accelerate import Accelerator
 import webdataset as wds
 from torch.utils.data import DataLoader
-from common.bucket_sampler import BucketSampler
+from common.bucket_sampler import BucketSampler, BucketSamplerExtractFeatures
 from torch.utils.tensorboard import SummaryWriter
 from webdataset.utils import pytorch_worker_info
 from torch.optim.adamw import AdamW
@@ -78,14 +78,27 @@ class Model:
         else:
             self.logger = None
         shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
-        self.sampler = BucketSampler(shards,
-                        params.r2_dataset_folder,
-                        self.accelerator,
-                        params.batch_size,
-                        params.r2_access_key,
-                        params.r2_secret_key,
-                        params.r2_endpoint,
-                        params.r2_bucket_name)
+        if params.compute_features == False:
+            self.sampler = BucketSampler(shards,
+                            params.r2_dataset_folder,
+                            self.accelerator,
+                            params.batch_size,
+                            params.r2_access_key,
+                            params.r2_secret_key,
+                            params.r2_endpoint,
+                            params.r2_bucket_name)
+        else:
+            self.sampler = BucketSamplerExtractFeatures(shards,
+                            params.r2_dataset_folder,
+                            self.accelerator,
+                            params.batch_size,
+                            params.r2_access_key,
+                            params.r2_secret_key,
+                            params.r2_endpoint,
+                            params.r2_bucket_name,
+                            params.vae_max_batch_size,
+                            params.text_encoder_max_batch_size,
+                            self)
         #self.sampler = self.accelerator.prepare(self.sampler)
         
         # check for lora training

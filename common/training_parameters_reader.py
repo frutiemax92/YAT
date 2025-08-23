@@ -53,9 +53,16 @@ class TrainingParameters:
             self.r2_access_key = yaml_root['r2_access_key']
             self.r2_secret_key = yaml_root['r2_secret_key']
             self.r2_bucket_name = yaml_root['r2_bucket_name']
-            self.r2_tar_files = yaml_root['r2_tar_files']
+
+            self.r2_tar_files = yaml_root['r2_tar_files'] if 'r2_tar_files' in yaml_root.keys() else None
         else:
             self.urls = yaml_root['urls']
+        
+        self.compute_features = False
+        if 'compute_features' in yaml_root.keys():
+            self.compute_features = True
+            self.vae_max_batch_size = int(yaml_root['vae_max_batch_size'])
+            self.text_encoder_max_batch_size = int(yaml_root['text_encoder_max_batch_size'])
         
         self.num_shards = int(yaml_root['num_shards']) if 'num_shards' in yaml_root.keys() else None
         self.r2_dataset_folder = yaml_root['r2_dataset_folder'] if 'r2_dataset_folder' in yaml_root.keys() else None

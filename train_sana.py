@@ -62,6 +62,8 @@ class SanaModel(Model):
         pass
     
     def extract_latents(self, images):
+        # put the vae on the gpu if it's not already
+        self.pipe.vae.to(device=self.accelerator.device)
         output = self.pipe.vae.encode(images.to(dtype=self.pipe.vae.dtype)).latent
         return output.to(torch.bfloat16) * self.pipe.vae.config.scaling_factor
 
