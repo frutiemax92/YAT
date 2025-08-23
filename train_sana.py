@@ -17,6 +17,7 @@ class SanaModel(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
         self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path)
+        #self.patch()
         if params.pretrained_model_path != None:
             transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path) 
             self.pipe.transformer = transformer
@@ -47,9 +48,14 @@ class SanaModel(Model):
         self.model.enable_gradient_checkpointing()
     
     def patch(self):
-        self.pipe.transformer = PatchedSanaTransformer2DModel.from_pretrained(self.params.pretrained_model_path)
+        config = SanaTransformer2DModel.load_config(self.params.pretrained_pipe_path, subfolder='transformer')
+        config['interpolation_scale'] = 1.0
+        self.pipe.transformer = PatchedSanaTransformer2DModel.from_config(config)
         depth = self.pipe.transformer.config.num_layers
         patch_sana_attention_layers(self.pipe.transformer, [i for i in range(depth)])
+
+        # also put a PatchEmbed with positional encoding
+
     
     def initialize(self):
         super().initialize()
