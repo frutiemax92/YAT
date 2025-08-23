@@ -29,7 +29,12 @@ class FeaturesExtractor:
 
         # allocate a range of shards for our process
         self.shard_index_begin = self.process_index * num_shards_per_gpu
-        self.shard_index_end = self.shard_index_begin + num_shards_per_gpu
+
+        if self.process_index != self.num_processes - 1:
+            self.shard_index_end = self.shard_index_begin + num_shards_per_gpu
+        else:
+            # SIMPLE FIX: the last process takes all the remaining shards
+            self.shard_index_end = self.params.num_shards
 
     def run(self, local_temp_dir = 'temp', max_pending_uploads=4):
         # build the webdataset from the shard range
