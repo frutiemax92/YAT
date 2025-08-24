@@ -232,9 +232,8 @@ class BucketSamplerExtractFeatures(BucketSampler):
                 .decode('pil')
                 .to_tuple('jpg', 'txt')
             )
-
             
-            #self.accelerator.wait_for_everyone()
+            self.accelerator.wait_for_everyone()
             print(f'proc:{self.process_index} after wait')
             for img, caption in dataset:
                 ratio = img.height / img.width
@@ -290,7 +289,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
                                 
                                 for i in range(0, len(batch[1]), self.text_encoder_max_batch_size):
                                     end_index = min(len(batch[1]), i+self.text_encoder_max_batch_size)
-                                    captions = batch[1][i:end_index]
+                                    captions = batch[1][i:i+self.text_encoder_max_batch_size]
                                     embeds = self.model.extract_embeddings(captions)
                                     embeddings.extend(embeds)
                             yield torch.stack(vae_features), embeddings
@@ -298,6 +297,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
                             # Clean up after yielding
                             self.buckets[closest_ratio].clear()
                             self.valid_buckets.remove(closest_ratio)
+                            self.accelerator.wait_for_everyone()
                             break
                             
                 except Exception as e:
