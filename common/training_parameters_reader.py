@@ -58,6 +58,8 @@ class TrainingParameters:
         else:
             self.urls = yaml_root['urls']
         
+        self.warmup_steps = int(yaml_root['warmup_steps']) if 'warmup_steps' in yaml_root.keys() else None
+        
         self.compute_features = False
         if 'compute_features' in yaml_root.keys():
             self.compute_features = True

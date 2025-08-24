@@ -27,6 +27,8 @@ from common.cache import CacheFeaturesCompute, CacheLoadFeatures
 from transformers import AutoImageProcessor, AutoModel
 import random
 import io
+from torch.optim.lr_scheduler import LambdaLR
+from transformers import get_scheduler
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
@@ -135,14 +137,15 @@ class Model:
         self.optimizer = self.accelerator.prepare(self.optimizer)
         #self.model = self.accelerator.prepare(self.model)
 
+        warmup_steps = params.warmup_steps
         self.lr_scheduler = None
-        if params.cyclic_lr_max_lr != None:
-            self.lr_scheduler = CyclicLR(optimizer=self.optimizer,
-                                    base_lr=params.learning_rate,
-                                    max_lr=params.cyclic_lr_max_lr,
-                                    step_size_up=params.cyclic_lr_step_size_up,
-                                    step_size_down=params.cyclic_lr_step_size_down,
-                                    mode=params.cylic_lr_mode)
+        if warmup_steps != None:
+            def lr_lambda(current_step):
+                if current_step < warmup_steps:
+                    return float(current_step) / float(max(1, warmup_steps))
+                return 1.0  # full LR after warmup
+            self.lr_scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
+
         # apply EMA
         if self.params.use_ema:
             self.ema_model = EMAModel(self.model.parameters(), decay=0.999)
