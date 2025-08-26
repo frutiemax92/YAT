@@ -33,7 +33,8 @@ def get_secured_urls(r2_access_key : str,
     ) for tar_file in r2_tar_files]
 
 def download_tar(url, local_path):
-    with requests.get(url, stream=True) as r:
+    # if we don't get any chunk under 60 seconds, raise an exception!
+    with requests.get(url, stream=True, timeout=60) as r:
         r.raise_for_status()
         with open(local_path, 'wb') as f:
             for chunk in tqdm(r.iter_content(chunk_size=8192), desc='downloading chunks'):
