@@ -1,4 +1,3 @@
-import multiprocessing
 from tqdm import tqdm
 from torch.utils.data import BatchSampler, IterableDataset
 import random
@@ -15,6 +14,8 @@ import argparse
 from common.training_parameters_reader import TrainingParameters
 from collections import deque
 import io
+import multiprocessing as mp
+import time
 
 
 def flush():
@@ -166,6 +167,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
                  vae_max_batch_size : int,
                  text_encoder_max_batch_size : int,
                  model,
+                 cache_size : int,
                  local_temp_dir : str = 'temp'  
                  ):
         super().__init__(shards,
@@ -180,6 +182,8 @@ class BucketSamplerExtractFeatures(BucketSampler):
         self.vae_max_batch_size = vae_max_batch_size
         self.text_encoder_max_batch_size = text_encoder_max_batch_size
         self.model = model
+        self.cache_size = cache_size
+        self.valid_shards = []
     
     def find_closest_ratio(self, ratio):
         max_error = 1000.0
@@ -190,19 +194,35 @@ class BucketSamplerExtractFeatures(BucketSampler):
                 max_error = error
                 res = float(r)
         return res
-    
+
     def __iter__(self):
-        current_shard_index = self.get_next_shard_index()
+        def download_shard_worker(self, q : mp.Queue, num_tars = mp.Value):
+            current_item = 0
+            while True:
+                with num_tars.get_lock():
+                    n = num_tars.value
+                    if n >= self.cache_size:
+                        time.sleep(1.0)
+                        continue
+                current_shard_index = self.get_next_shard_index()
+                dataset_url = get_secured_urls(self.r2_access_key,
+                                    self.r2_secret_key,
+                                    self.r2_endpoint,
+                                    self.r2_bucket_name,
+                                    [self.features_path + '/' + self.shards[current_shard_index]]
+                                    )[0]
+                local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
+                try:
+                    download_tar(dataset_url, local_shard_path)
+                except:
+                    current_shard_index = self.get_next_shard_index()
+                    continue
+                q.put(local_shard_path)
+                with num_tars.get_lock():
+                    num_tars.value = num_tars.value + 1
+                current_item = current_item + 1
+
         sync_counter = 0
-    
-        def pt_decoder(key, value):
-            if key.endswith(".pt"):
-                # Load the tensor from the bytes object
-                return torch.load(io.BytesIO(value), map_location="cpu")
-            else:
-                return value.decode('utf-8')
-            
-        
         def get_transform(bucket):
             aspect_ratio = self.model.aspect_ratios[str(bucket)]
             target_height = int(aspect_ratio[0])
@@ -212,21 +232,14 @@ class BucketSamplerExtractFeatures(BucketSampler):
                 transforms.ToTensor(),
                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
             ])
+        
+        # start the download process
+        q = mp.Queue()
+        num_tars = mp.Value('i', 0)
+        p = mp.Process(target=download_shard_worker, args=(self, q, num_tars))
+        p.start()
         while True:
-            dataset_url = get_secured_urls(self.r2_access_key,
-                                           self.r2_secret_key,
-                                            self.r2_endpoint,
-                                            self.r2_bucket_name,
-                                            [self.features_path + '/' + self.shards[current_shard_index]]
-                                           )[0]
-            local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}.tar'
-            print(f'proc:{self.process_index} before download')
-            try:
-                download_tar(dataset_url, local_shard_path)
-            except:
-                current_shard_index = self.get_next_shard_index()
-                continue
-
+            local_shard_path = q.get()
             dataset = (
                 wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None, handler=wds.ignore_and_continue)
                 .decode('pil')
@@ -307,4 +320,5 @@ class BucketSamplerExtractFeatures(BucketSampler):
             # Clean up at end of shard
             if os.path.exists(local_shard_path):
                 os.remove(local_shard_path)
-            current_shard_index = self.get_next_shard_index()
+            with num_tars.get_lock():
+                num_tars.value = num_tars.value - 1

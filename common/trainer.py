@@ -29,11 +29,14 @@ import random
 import io
 from torch.optim.lr_scheduler import LambdaLR
 from transformers import get_scheduler
+import os
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
 class Model:
     def __init__(self, params : TrainingParameters):
+        os.environ['NCCL_P2P_DISABLE'] = '1'
+        os.environ['NCCL_IB_DISABLE'] = '1'
         self.accelerator = Accelerator(gradient_accumulation_steps=params.gradient_accumulation_steps)
         self.params = params
 
@@ -100,7 +103,8 @@ class Model:
                             params.r2_bucket_name,
                             params.vae_max_batch_size,
                             params.text_encoder_max_batch_size,
-                            self)
+                            self,
+                            cache_size=4)
         #self.sampler = self.accelerator.prepare(self.sampler)
         
         # check for lora training
