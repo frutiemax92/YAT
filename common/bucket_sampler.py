@@ -293,6 +293,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
 
                             transform = get_transform(closest_ratio)
                             with torch.no_grad():
+                                flush()
                                 for i in range(0, len(batch[0]), self.vae_max_batch_size):
                                     end_index = min(len(batch[0]), i+self.vae_max_batch_size)
                                     images = batch[0][i:end_index]
@@ -300,6 +301,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
                                     features = self.model.extract_latents(images)
                                     vae_features.extend(features)
                                 
+                                flush()
                                 for i in range(0, len(batch[1]), self.text_encoder_max_batch_size):
                                     end_index = min(len(batch[1]), i+self.text_encoder_max_batch_size)
                                     captions = batch[1][i:i+self.text_encoder_max_batch_size]
