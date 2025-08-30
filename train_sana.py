@@ -53,9 +53,6 @@ class SanaModel(Model):
         self.pipe.transformer = PatchedSanaTransformer2DModel.from_config(config)
         depth = self.pipe.transformer.config.num_layers
         patch_sana_attention_layers(self.pipe.transformer, [i for i in range(depth)])
-
-        # also put a PatchEmbed with positional encoding
-
     
     def initialize(self):
         super().initialize()

@@ -201,9 +201,9 @@ class BucketSamplerExtractFeatures(BucketSampler):
             while True:
                 with num_tars.get_lock():
                     n = num_tars.value
-                    if n >= self.cache_size:
-                        time.sleep(1.0)
-                        continue
+                if n >= self.cache_size:
+                    time.sleep(1.0)
+                    continue
                 current_shard_index = self.get_next_shard_index()
                 dataset_url = get_secured_urls(self.r2_access_key,
                                     self.r2_secret_key,
