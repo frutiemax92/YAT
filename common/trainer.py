@@ -267,10 +267,13 @@ class Model:
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
 
                     if self.logger != None:
-                        self.logger.add_scalar('train/loss', mean_loss.item(), self.global_step)
-                        if self.lr_scheduler != None:
-                            last_lr = self.lr_scheduler.get_last_lr()
-                            self.logger.add_scalar('train/lr', last_lr[0], self.global_step)
+                        try:
+                            self.logger.add_scalar('train/loss', mean_loss.item(), self.global_step)
+                            if self.lr_scheduler != None:
+                                last_lr = self.lr_scheduler.get_last_lr()
+                                self.logger.add_scalar('train/lr', last_lr[0], self.global_step)
+                        except OSError as e:
+                            print(f"[Warning] TensorBoard logging failed: {e}")
                     progress_bar.update(1)
                 self.global_step = self.global_step + 1
             # if hasattr(self, 'repa_model'):
