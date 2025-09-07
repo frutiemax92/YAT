@@ -92,16 +92,15 @@ class SD15Model(Model):
         latents = []
         embeds = []
         for prompt in tqdm.tqdm(params.validation_prompts, desc='Generating validation embeddings'):
-            if params.low_vram:
-                text_encoder = text_encoder.to(device=self.accelerator.device)
-                self.pipe.text_encoder = text_encoder
-                prompt_embeds, negative_prompt_embeds = \
-                    self.pipe.encode_prompt(
-                        prompt,
-                        device=self.accelerator.device,
-                        num_images_per_prompt=1,
-                        do_classifier_free_guidance=True)
-                embeds.append((prompt_embeds, negative_prompt_embeds))
+            text_encoder = text_encoder.to(device=self.accelerator.device)
+            self.pipe.text_encoder = text_encoder
+            prompt_embeds, negative_prompt_embeds = \
+                self.pipe.encode_prompt(
+                    prompt,
+                    device=self.accelerator.device,
+                    num_images_per_prompt=1,
+                    do_classifier_free_guidance=True)
+            embeds.append((prompt_embeds, negative_prompt_embeds))
         
         text_encoder = text_encoder.cpu()
         self.pipe.text_encoder = None
