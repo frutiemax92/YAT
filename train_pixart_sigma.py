@@ -60,31 +60,18 @@ class PixartSigmaTrainer(Model):
     
     def extract_latents(self, images):
         # move vae to cuda if it's not already done
-        self.pipe.transformer.cpu()
         vae = self.pipe.vae
         vae = vae.to(device=self.accelerator.device)
-        image_processor = self.pipe.image_processor
-        images = image_processor.preprocess(images)
-
-        gc.collect()
-        torch.cuda.empty_cache()
-
-        if self.pipe.vae.config['_class_name'] != 'AutoencoderDC':
-            output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent_dist.sample()
-        else:
-            output = vae.encode(images).latent
+        output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent_dist.sample()
         return output * self.pipe.vae.config.scaling_factor
 
     def extract_embeddings(self, captions):
         # move text_encoder to cuda if not already done
-        self.pipe.transformer.cpu()
         self.pipe.text_encoder = self.pipe.text_encoder.to(device=self.accelerator.device)
-
-        gc.collect()
-        torch.cuda.empty_cache()
         prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
         self.pipe.encode_prompt(captions, do_classifier_free_guidance=False, device=self.accelerator.device)
-        return prompt_embeds, prompt_attention_mask
+        embeds = [prompt_embeds[idx][prompt_attention_mask[idx].bool()] for idx in range(len(prompt_embeds))]
+        return embeds
     
     def validate(self):
         params = self.params
@@ -161,14 +148,25 @@ class PixartSigmaTrainer(Model):
         self.pipe.text_encoder = text_encoder
         self.pipe.to(dtype=torch.bfloat16)
     
-    def optimize(self, model, batch):
+    def optimize(self, latents, embeddings):
         self.pipe.vae.cpu()
         self.pipe.text_encoder.cpu()
         self.model.to(self.accelerator.device)
         params = self.params
         batch_size = params.batch_size
-        _, latents, embeddings, attention_mask = batch
 
+        padded_embeds = []
+        masks = []
+        for emb in embeddings:
+            padded_emb = torch.nn.functional.pad(emb, pad=(0, 0, 0, 300 - emb.shape[0]), mode='constant', value=0)
+            mask = torch.zeros(300, dtype=torch.long, device=emb.device)
+            mask[:emb.shape[0]] = 1
+            masks.append(mask)
+            padded_embeds.append(padded_emb)
+        
+        # Move everything to device and correct dtype
+        attention_mask = torch.stack(masks).to(device=self.accelerator.device)
+        embeddings = torch.stack(padded_embeds).to(device=self.accelerator.device, dtype=torch.bfloat16)
         loss_fn = torch.nn.MSELoss()
         noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=self.pipe.dtype)
 
@@ -177,23 +175,13 @@ class PixartSigmaTrainer(Model):
         timesteps = self.scheduler.timesteps[indices].to(latents.device)
         noisy_model_input = self.scheduler.add_noise(latents.to(self.accelerator.device), noise, timesteps)
 
-        transformer = model
+        transformer = self.model
         noise_pred = transformer(noisy_model_input.to(dtype=transformer.dtype),
                                 encoder_hidden_states=embeddings.to(dtype=transformer.dtype),
                                 timestep=timesteps,
                                 encoder_attention_mask=attention_mask.to(dtype=transformer.dtype)).sample.chunk(2, 1)[0]
         target = noise[:noise_pred.shape[0], :noise_pred.shape[1], :noise_pred.shape[2], :noise_pred.shape[3]]
         loss = loss_fn(noise_pred.to(dtype=noise.dtype), target)
-
-        if hasattr(model, 'get_alphas'):
-            alphas = model.get_alphas()
-            count = len(alphas)
-            mean_alpha = torch.mean(torch.stack(alphas))
-            loss_alpha = loss_fn(mean_alpha, torch.tensor(1.0, device=mean_alpha.device, dtype=mean_alpha.dtype))
-            loss = loss + loss_alpha
-            if self.logger != None:
-                self.logger.add_scalar('train/mean_alpha', mean_alpha.item(), self.global_step)
-                self.logger.add_scalar('train/loss_alpha', loss_alpha.item(), self.global_step)
         return loss
         
 if __name__ == '__main__':
