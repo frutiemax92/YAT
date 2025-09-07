@@ -74,6 +74,8 @@ class Model:
         return str(target_ratio)
     
     def initialize(self):
+        # use flash attention
+        self.pipe.enable_xformers_memory_efficient_attention()
         params = self.params
         if self.accelerator.is_main_process:
             self.logger = SummaryWriter()
