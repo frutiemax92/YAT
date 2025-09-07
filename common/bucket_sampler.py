@@ -16,6 +16,7 @@ from collections import deque
 import io
 import multiprocessing as mp
 import time
+from PIL import Image
 
 
 def flush():
@@ -33,6 +34,7 @@ class BucketSampler:
                  r2_secret_key : str,
                  r2_endpoint : str,
                  r2_bucket_name : str,
+                 cache_size : int,
                  local_temp_dir : str = 'temp'  
                  ):
         self.process_index = accelerator.process_index
@@ -51,11 +53,30 @@ class BucketSampler:
         self.r2_bucket_name = r2_bucket_name
         self.local_temp_dir = local_temp_dir
         self.features_path = features_path
+        self.cache_size = cache_size
+        self.keys = ['jpg', 'txt']
 
         os.makedirs(self.local_temp_dir, exist_ok=True)
 
+    def pt_decoder(self, key, value):
+        if key.endswith(".pt"):
+            return torch.load(io.BytesIO(value), map_location="cpu")
+        elif key.endswith(".txt"):
+            return value.decode("utf-8")
+        elif key.endswith((".jpg", ".jpeg", ".png")):
+            return Image.open(io.BytesIO(value)).convert("RGB")
+        else:
+            return value
+    
     def add_bucket(self, ratio):
         self.buckets[ratio] = deque(maxlen=self.batch_size)
+
+    def process_element(self, elem):
+        ratio, latent, emb = elem['ratio'], elem['latent.pt'], elem['emb.pt']
+        ratio = float(ratio)
+        if not ratio in self.buckets.keys():
+            self.add_bucket(ratio)
+        self.buckets[ratio].append((latent, emb))
 
     def find_closest_ratio(self, ratio):
         max_error = 1000.0
@@ -70,45 +91,54 @@ class BucketSampler:
     def get_next_shard_index(self):
         return random.randint(0, len(self.shards) - 1)
     
-    def __iter__(self):
-        current_shard_index = self.get_next_shard_index()
-        sync_counter = 0
+    def extract_features(self, batch, ratio):
+        return torch.stack(batch[0]), batch[1]
     
-        def pt_decoder(key, value):
-            if key.endswith(".pt"):
-                # Load the tensor from the bytes object
-                return torch.load(io.BytesIO(value), map_location="cpu")
-            else:
-                return value.decode('utf-8')
-        while True:
-            dataset_url = get_secured_urls(self.r2_access_key,
-                                           self.r2_secret_key,
-                                            self.r2_endpoint,
-                                            self.r2_bucket_name,
-                                            [self.features_path + '/' + self.shards[current_shard_index]]
-                                           )[0]
-            local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}.tar'
-            print(f'proc:{self.process_index} before download')
-            try:
-                download_tar(dataset_url, local_shard_path)
-            except:
+    def __iter__(self):
+        def download_shard_worker(self, q : mp.Queue, num_tars = mp.Value):
+            current_item = 0
+            while True:
+                with num_tars.get_lock():
+                    n = num_tars.value
+                if n >= self.cache_size:
+                    time.sleep(1.0)
+                    continue
                 current_shard_index = self.get_next_shard_index()
-                continue
+                dataset_url = get_secured_urls(self.r2_access_key,
+                                    self.r2_secret_key,
+                                    self.r2_endpoint,
+                                    self.r2_bucket_name,
+                                    [self.features_path + '/' + self.shards[current_shard_index]]
+                                    )[0]
+                local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
+                try:
+                    download_tar(dataset_url, local_shard_path)
+                except:
+                    current_shard_index = self.get_next_shard_index()
+                    continue
+                q.put(local_shard_path)
+                with num_tars.get_lock():
+                    num_tars.value = num_tars.value + 1
+                current_item = current_item + 1
 
+        sync_counter = 0
+        
+        # start the download process
+        q = mp.Queue()
+        num_tars = mp.Value('i', 0)
+        p = mp.Process(target=download_shard_worker, args=(self, q, num_tars))
+        p.start()
+        while True:
+            local_shard_path = q.get()
             dataset = (
                 wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None, handler=wds.ignore_and_continue)
-                .decode(pt_decoder)
-                .to_tuple('ratio', 'latent.pt', 'emb.pt')
+                .decode(self.pt_decoder)
             )
-
             
-            #self.accelerator.wait_for_everyone()
+            self.accelerator.wait_for_everyone()
             print(f'proc:{self.process_index} after wait')
-            for ratio, latent, emb in dataset:
-                ratio = float(ratio)
-                if not ratio in self.buckets.keys():
-                    self.add_bucket(ratio)
-                self.buckets[ratio].append((latent, emb))
+            for elem in dataset:
+                self.process_element(elem)
                 
                 sync_counter += 1
                 if sync_counter % (self.batch_size * 2) != 0:
@@ -131,18 +161,24 @@ class BucketSampler:
                     
                     unique_ratios, counts = torch.unique(dist_valid_buckets, return_counts=True)
                     ratio_counts = {float(r): int(c) for r, c in zip(unique_ratios, counts) 
-                                  if r != -1.0}
+                                    if r != -1.0}
                     
                     for ratio, count in ratio_counts.items():
                         if count >= self.num_processes:
                             closest_ratio = self.find_closest_ratio(ratio)
                             batch = ([self.buckets[closest_ratio][i][0] for i in range(self.batch_size)],
                                     [self.buckets[closest_ratio][i][1] for i in range(self.batch_size)])
-                            yield torch.stack(batch[0]), batch[1]
+                            
+                            # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
+                            # as extracting features tends to use more VRAM than actually training the model
+                            # we freeze the vae and text encoder model
+                            vae_features, embeddings = self.extract_features(batch, closest_ratio)
+                            yield vae_features, embeddings
                             
                             # Clean up after yielding
                             self.buckets[closest_ratio].clear()
                             self.valid_buckets.remove(closest_ratio)
+                            self.accelerator.wait_for_everyone()
                             break
                             
                 except Exception as e:
@@ -152,7 +188,8 @@ class BucketSampler:
             # Clean up at end of shard
             if os.path.exists(local_shard_path):
                 os.remove(local_shard_path)
-            current_shard_index = self.get_next_shard_index()
+            with num_tars.get_lock():
+                num_tars.value = num_tars.value - 1
 
 class BucketSamplerExtractFeatures(BucketSampler):
     def __init__(self,
@@ -184,6 +221,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
         self.model = model
         self.cache_size = cache_size
         self.valid_shards = []
+        self.keys = ['ratio', 'emb', 'latent']
     
     def find_closest_ratio(self, ratio):
         max_error = 1000.0
@@ -195,132 +233,47 @@ class BucketSamplerExtractFeatures(BucketSampler):
                 res = float(r)
         return res
 
-    def __iter__(self):
-        def download_shard_worker(self, q : mp.Queue, num_tars = mp.Value):
-            current_item = 0
-            while True:
-                with num_tars.get_lock():
-                    n = num_tars.value
-                if n >= self.cache_size:
-                    time.sleep(1.0)
-                    continue
-                current_shard_index = self.get_next_shard_index()
-                dataset_url = get_secured_urls(self.r2_access_key,
-                                    self.r2_secret_key,
-                                    self.r2_endpoint,
-                                    self.r2_bucket_name,
-                                    [self.features_path + '/' + self.shards[current_shard_index]]
-                                    )[0]
-                local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
-                try:
-                    download_tar(dataset_url, local_shard_path)
-                except:
-                    current_shard_index = self.get_next_shard_index()
-                    continue
-                q.put(local_shard_path)
-                with num_tars.get_lock():
-                    num_tars.value = num_tars.value + 1
-                current_item = current_item + 1
+    def process_element(self, elem):
+        img, caption = elem['jpg'], elem['txt']
+        ratio = img.height / img.width
+        ratio = self.find_closest_ratio(ratio)
+        ratio = float(ratio)
+        if not ratio in self.buckets.keys():
+            self.add_bucket(ratio)
+        self.buckets[ratio].append((img, caption))
+    
+    def extract_features(self, batch, ratio):
+        # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
+        # as extracting features tends to use more VRAM than actually training the model
+        # we freeze the vae and text encoder model
+        vae_features = []
+        embeddings = []
 
-        sync_counter = 0
-        def get_transform(bucket):
-            aspect_ratio = self.model.aspect_ratios[str(bucket)]
-            target_height = int(aspect_ratio[0])
-            target_width = int(aspect_ratio[1])
-            return transforms.Compose([
-                transforms.Resize((target_height, target_width)),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-            ])
-        
-        # start the download process
-        q = mp.Queue()
-        num_tars = mp.Value('i', 0)
-        p = mp.Process(target=download_shard_worker, args=(self, q, num_tars))
-        p.start()
-        while True:
-            local_shard_path = q.get()
-            dataset = (
-                wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None, handler=wds.ignore_and_continue)
-                .decode('pil')
-                .to_tuple('jpg', 'txt')
-            )
+        transform = self.get_transform(ratio)
+        with torch.no_grad():
+            flush()
+            for i in range(0, len(batch[0]), self.vae_max_batch_size):
+                end_index = min(len(batch[0]), i+self.vae_max_batch_size)
+                images = batch[0][i:end_index]
+                images = torch.stack([transform(x) for x in images]).to(dtype=torch.bfloat16, device=self.accelerator.device)
+                features = self.model.extract_latents(images)
+                vae_features.extend(features)
             
-            self.accelerator.wait_for_everyone()
-            print(f'proc:{self.process_index} after wait')
-            for img, caption in dataset:
-                ratio = img.height / img.width
-                ratio = self.find_closest_ratio(ratio)
-                ratio = float(ratio)
-                if not ratio in self.buckets.keys():
-                    self.add_bucket(ratio)
-                self.buckets[ratio].append((img, caption))
-                
-                sync_counter += 1
-                if sync_counter % (self.batch_size * 2) != 0:
-                    continue
-                
-                # Check for valid buckets before synchronization
-                for r in list(self.buckets.keys()):
-                    if len(self.buckets[r]) >= self.batch_size:
-                        self.valid_buckets.add(r)
-                
-                bucket_list = list(self.valid_buckets)
-                max_buckets = 100
-                bucket_list = bucket_list[:max_buckets] + [-1.0] * (max_buckets - len(bucket_list))
-                bucket_tensor = torch.tensor(bucket_list, device=self.device, dtype=torch.float32)
-                
-                try:
-                    # Gather valid buckets across processes
-                    self.accelerator.wait_for_everyone()
-                    dist_valid_buckets = self.accelerator.gather(bucket_tensor)
-                    
-                    unique_ratios, counts = torch.unique(dist_valid_buckets, return_counts=True)
-                    ratio_counts = {float(r): int(c) for r, c in zip(unique_ratios, counts) 
-                                  if r != -1.0}
-                    
-                    for ratio, count in ratio_counts.items():
-                        if count >= self.num_processes:
-                            closest_ratio = self.find_closest_ratio(ratio)
-                            batch = ([self.buckets[closest_ratio][i][0] for i in range(self.batch_size)],
-                                    [self.buckets[closest_ratio][i][1] for i in range(self.batch_size)])
-                            
-                            # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
-                            # as extracting features tends to use more VRAM than actually training the model
-                            # we freeze the vae and text encoder model
-                            vae_features = []
-                            embeddings = []
-
-                            transform = get_transform(closest_ratio)
-                            with torch.no_grad():
-                                flush()
-                                for i in range(0, len(batch[0]), self.vae_max_batch_size):
-                                    end_index = min(len(batch[0]), i+self.vae_max_batch_size)
-                                    images = batch[0][i:end_index]
-                                    images = torch.stack([transform(x) for x in images]).to(dtype=torch.bfloat16, device=self.accelerator.device)
-                                    features = self.model.extract_latents(images)
-                                    vae_features.extend(features)
-                                
-                                flush()
-                                for i in range(0, len(batch[1]), self.text_encoder_max_batch_size):
-                                    end_index = min(len(batch[1]), i+self.text_encoder_max_batch_size)
-                                    captions = batch[1][i:i+self.text_encoder_max_batch_size]
-                                    embeds = self.model.extract_embeddings(captions)
-                                    embeddings.extend(embeds)
-                            yield torch.stack(vae_features), embeddings
-                            
-                            # Clean up after yielding
-                            self.buckets[closest_ratio].clear()
-                            self.valid_buckets.remove(closest_ratio)
-                            self.accelerator.wait_for_everyone()
-                            break
-                            
-                except Exception as e:
-                    print(f"Process {self.process_index} gather error: {e}")
-                    continue
-            
-            # Clean up at end of shard
-            if os.path.exists(local_shard_path):
-                os.remove(local_shard_path)
-            with num_tars.get_lock():
-                num_tars.value = num_tars.value - 1
+            flush()
+            for i in range(0, len(batch[1]), self.text_encoder_max_batch_size):
+                end_index = min(len(batch[1]), i+self.text_encoder_max_batch_size)
+                captions = batch[1][i:i+self.text_encoder_max_batch_size]
+                embeds = self.model.extract_embeddings(captions)
+                embeddings.extend(embeds)
+        return torch.stack(vae_features), embeddings
+    
+    def get_transform(self, bucket):
+        aspect_ratio = self.model.aspect_ratios[str(bucket)]
+        target_height = int(aspect_ratio[0])
+        target_width = int(aspect_ratio[1])
+        return transforms.Compose([
+            transforms.Resize((target_height, target_width)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ])
+    

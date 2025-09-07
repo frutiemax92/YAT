@@ -91,7 +91,8 @@ class Model:
                             params.r2_access_key,
                             params.r2_secret_key,
                             params.r2_endpoint,
-                            params.r2_bucket_name)
+                            params.r2_bucket_name,
+                            cache_size=4)
         else:
             self.sampler = BucketSamplerExtractFeatures(shards,
                             params.r2_dataset_folder,
