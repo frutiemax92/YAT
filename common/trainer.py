@@ -165,7 +165,7 @@ class Model:
 
         # extract empty embedding
         with torch.no_grad():
-            self.empty_embeddings = self.extract_embeddings('')
+            self.empty_embeddings = self.extract_embeddings([''])
 
     def validate(self):
         raise NotImplemented

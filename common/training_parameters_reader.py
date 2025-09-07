@@ -81,10 +81,15 @@ class TrainingParameters:
         self.extract_features = 'extract_features' in yaml_root.keys()
         
         self.batch_size = int(yaml_root['batch_size'])
-        self.pretrained_pipe_path = yaml_root['pretrained_pipe_path']
         
         if 'pretrained_model_path' in yaml_root.keys():
             self.pretrained_model_path = yaml_root['pretrained_model_path']
+        
+        # this is used for loading the sd1.5 compvis safetensors format
+        if 'pretrained_pipe_single_file' in yaml_root.keys():
+            self.pretrained_pipe_single_file = yaml_root['pretrained_pipe_single_file']
+        else:
+            self.pretrained_pipe_path = yaml_root['pretrained_pipe_path']
         
         self.learning_rate = float(yaml_root['learning_rate'])
         self.steps = int(yaml_root['steps'])
