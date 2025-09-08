@@ -44,11 +44,21 @@ class Model:
         self.num_processes = self.accelerator.num_processes
 
         # each gpu should have the same number of shards
-        num_shards_per_gpu = self.params.num_shards // self.num_processes
+        if self.params.num_shards >= self.num_processes:
+            num_shards_per_gpu = self.params.num_shards // self.num_processes
 
-        # allocate a range of shards for our process
-        self.shard_index_begin = self.process_index * num_shards_per_gpu
-        self.shard_index_end = self.shard_index_begin + num_shards_per_gpu
+            # allocate a range of shards for our process
+            self.shard_index_begin = self.process_index * num_shards_per_gpu
+
+            if self.process_index != self.num_processes - 1:
+                self.shard_index_end = self.shard_index_begin + num_shards_per_gpu
+            else:
+                self.shard_index_end = self.params.num_shards
+        else:
+            # in the case of less shards than GPUs, repeat the images on all gpus
+            self.shard_index_begin = 0
+            self.shard_index_end = self.params.num_shards
+        
         self.global_step = 0
 
     def extract_latents(self, images):
@@ -184,7 +194,7 @@ class Model:
     def run(self):
         params = self.params
         self.initialize()
-
+        loss_fn = torch.nn.MSELoss()
         progress_bar = tqdm.tqdm(total=params.steps, desc='Num Steps')
         avg_loss = torch.tensor(0, device=self.accelerator.device)
 

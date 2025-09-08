@@ -114,12 +114,6 @@ class TrainingParameters:
         else:
             self.gradient_accumulation_steps = 1
         
-        if 'use_preservation' in yaml_root.keys():
-            self.use_preservation = True
-            self.preservation_ratio = float(yaml_root['preservation_ratio'])
-        else:
-            self.use_preservation = False
-        
         self.use_ema = False
         if 'use_ema' in yaml_root.keys():
             self.use_ema = True
@@ -163,6 +157,7 @@ class TrainingParameters:
 
             self.lora_use_rslora = 'lora_use_rslora' in yaml_root.keys()
             self.lora_use_dora = 'lora_use_dora' in yaml_root.keys()
+            self.dreambooth_lambda = float(yaml_root['dreambooth_lambda']) if 'dreambooth_lambda' in yaml_root.keys() else None
         
         self.low_vram = 'low_vram' in yaml_root.keys()
         self.use_calculated_features = 'use_calculated_features' in yaml_root.keys()
