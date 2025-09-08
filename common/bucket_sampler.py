@@ -173,7 +173,7 @@ class BucketSampler:
                             # as extracting features tends to use more VRAM than actually training the model
                             # we freeze the vae and text encoder model
                             vae_features, embeddings = self.extract_features(batch, closest_ratio)
-                            yield vae_features, embeddings
+                            yield closest_ratio, vae_features, embeddings
                             
                             # Clean up after yielding
                             self.buckets[closest_ratio].clear()
@@ -264,7 +264,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
                 end_index = min(len(batch[1]), i+self.text_encoder_max_batch_size)
                 captions = batch[1][i:i+self.text_encoder_max_batch_size]
                 embeds = self.model.extract_embeddings(captions)
-                embeddings.extend(embeds)
+                embeddings.append(embeds)
         return torch.stack(vae_features), embeddings
     
     def get_transform(self, bucket):

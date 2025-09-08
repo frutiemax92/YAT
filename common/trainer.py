@@ -200,7 +200,7 @@ class Model:
 
         while self.global_step < self.params.steps:
             # then go through the cache items
-            for latents, embeddings in self.sampler:
+            for ratio, latents, embeddings in self.sampler:
                 if self.global_step % params.num_steps_per_validation == 0:
                     with torch.no_grad():
                         # ✅ Run reduction on ALL processes to sync EMA parameters
@@ -227,8 +227,8 @@ class Model:
                     if prob < self.params.train_unconditional_prob:
                         # put the embeddings to the empty one
                         for idx in range(len(embeddings)):
-                            embeddings[idx] = self.empty_embeddings[0]
-                    loss = self.optimize(latents, embeddings)
+                            embeddings[idx] = self.empty_embeddings
+                    loss = self.optimize(ratio, latents, embeddings)
                     
                     # # check if we are using repa
                     # if self.params.use_repa:

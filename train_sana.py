@@ -170,7 +170,7 @@ class SanaModel(Model):
         self.pipe.transformer = transformer
         self.pipe.transformer.to(dtype=torch.bfloat16, device=self.accelerator.device)
     
-    def optimize(self, latents, embeddings):
+    def optimize(self, ratio, latents, embeddings):
         params = self.params
         batch_size = params.batch_size
 
