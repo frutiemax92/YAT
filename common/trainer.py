@@ -4,7 +4,7 @@ from common.cloudflare import get_secured_urls
 from accelerate import Accelerator
 import webdataset as wds
 from torch.utils.data import DataLoader
-from common.bucket_sampler import BucketSampler, BucketSamplerExtractFeatures
+from common.bucket_sampler import BucketSampler, BucketSamplerExtractFeatures, BucketSamplerDreambooth
 from torch.utils.tensorboard import SummaryWriter
 from webdataset.utils import pytorch_worker_info
 from torch.optim.adamw import AdamW
@@ -44,20 +44,21 @@ class Model:
         self.num_processes = self.accelerator.num_processes
 
         # each gpu should have the same number of shards
-        if self.params.num_shards >= self.num_processes:
-            num_shards_per_gpu = self.params.num_shards // self.num_processes
+        if self.params.dreambooth_dataset_folder == None:
+            if self.params.num_shards >= self.num_processes:
+                num_shards_per_gpu = self.params.num_shards // self.num_processes
 
-            # allocate a range of shards for our process
-            self.shard_index_begin = self.process_index * num_shards_per_gpu
+                # allocate a range of shards for our process
+                self.shard_index_begin = self.process_index * num_shards_per_gpu
 
-            if self.process_index != self.num_processes - 1:
-                self.shard_index_end = self.shard_index_begin + num_shards_per_gpu
+                if self.process_index != self.num_processes - 1:
+                    self.shard_index_end = self.shard_index_begin + num_shards_per_gpu
+                else:
+                    self.shard_index_end = self.params.num_shards
             else:
+                # in the case of less shards than GPUs, repeat the images on all gpus
+                self.shard_index_begin = 0
                 self.shard_index_end = self.params.num_shards
-        else:
-            # in the case of less shards than GPUs, repeat the images on all gpus
-            self.shard_index_begin = 0
-            self.shard_index_end = self.params.num_shards
         
         self.global_step = 0
 
@@ -94,8 +95,20 @@ class Model:
             os.makedirs('models', exist_ok=True)
         else:
             self.logger = None
-        shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
-        if params.compute_features == False:
+        
+        if params.dreambooth_dataset_folder != None:
+            self.sampler = BucketSamplerDreambooth(
+                self.params.dreambooth_dataset_folder,
+                self.accelerator,
+                params.batch_size,
+                params.vae_max_batch_size,
+                params.text_encoder_max_batch_size,
+                self,
+                cache_size=4,
+                dreambooth_caption=params.dreambooth_caption
+            )
+        elif params.compute_features == False:
+            shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
             self.sampler = BucketSampler(shards,
                             params.r2_dataset_folder,
                             self.accelerator,
@@ -106,6 +119,7 @@ class Model:
                             params.r2_bucket_name,
                             cache_size=4)
         else:
+            shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
             self.sampler = BucketSamplerExtractFeatures(shards,
                             params.r2_dataset_folder,
                             self.accelerator,

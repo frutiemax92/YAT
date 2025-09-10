@@ -176,6 +176,13 @@ class TrainingParameters:
         if 'bucket_repeat' in yaml_root.keys():
             self.bucket_repeat = int(yaml_root['bucket_repeat'])
 
+        # for training simple dreambooth loras
+        self.dreambooth_dataset_folder = None
+        if 'dreambooth_dataset_folder' in yaml_root.keys():
+            self.dreambooth_dataset_folder = yaml_root['dreambooth_dataset_folder']
+        
+        self.dreambooth_caption = yaml_root['dreambooth_caption'] if 'dreambooth_caption' in yaml_root.keys() else None
+
 if __name__ == '__main__':
     params = TrainingParameters()
     params.read_yaml('tests/config_sana.yaml')

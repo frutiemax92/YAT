@@ -16,6 +16,7 @@ from collections import deque
 import io
 import multiprocessing as mp
 import time
+import random
 from PIL import Image
 
 
@@ -56,6 +57,32 @@ class BucketSampler:
         self.cache_size = cache_size
         self.keys = ['jpg', 'txt']
 
+        def download_shard_worker(self, q : mp.Queue, num_tars = mp.Value):
+            current_item = 0
+            while True:
+                with num_tars.get_lock():
+                    n = num_tars.value
+                if n >= self.cache_size:
+                    time.sleep(1.0)
+                    continue
+                current_shard_index = self.get_next_shard_index()
+                dataset_url = get_secured_urls(self.r2_access_key,
+                                    self.r2_secret_key,
+                                    self.r2_endpoint,
+                                    self.r2_bucket_name,
+                                    [self.features_path + '/' + self.shards[current_shard_index]]
+                                    )[0]
+                local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
+                try:
+                    download_tar(dataset_url, local_shard_path)
+                except:
+                    current_shard_index = self.get_next_shard_index()
+                    continue
+                q.put(local_shard_path)
+                with num_tars.get_lock():
+                    num_tars.value = num_tars.value + 1
+                current_item = current_item + 1
+        self.download_shard_proc = download_shard_worker
         os.makedirs(self.local_temp_dir, exist_ok=True)
 
     def pt_decoder(self, key, value):
@@ -94,45 +121,26 @@ class BucketSampler:
     def extract_features(self, batch, ratio):
         return torch.stack(batch[0]), batch[1]
     
+    def cleanup_shard(self, local_shard_path):
+        # Clean up at end of shard
+        if os.path.exists(local_shard_path):
+            os.remove(local_shard_path)
+        
     def __iter__(self):
-        def download_shard_worker(self, q : mp.Queue, num_tars = mp.Value):
-            current_item = 0
-            while True:
-                with num_tars.get_lock():
-                    n = num_tars.value
-                if n >= self.cache_size:
-                    time.sleep(1.0)
-                    continue
-                current_shard_index = self.get_next_shard_index()
-                dataset_url = get_secured_urls(self.r2_access_key,
-                                    self.r2_secret_key,
-                                    self.r2_endpoint,
-                                    self.r2_bucket_name,
-                                    [self.features_path + '/' + self.shards[current_shard_index]]
-                                    )[0]
-                local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
-                try:
-                    download_tar(dataset_url, local_shard_path)
-                except:
-                    current_shard_index = self.get_next_shard_index()
-                    continue
-                q.put(local_shard_path)
-                with num_tars.get_lock():
-                    num_tars.value = num_tars.value + 1
-                current_item = current_item + 1
-
         sync_counter = 0
+        random.seed(self.process_index)
         
         # start the download process
         q = mp.Queue()
         num_tars = mp.Value('i', 0)
-        p = mp.Process(target=download_shard_worker, args=(self, q, num_tars))
+        p = mp.Process(target=self.download_shard_proc, args=(self, q, num_tars))
         p.start()
         while True:
             local_shard_path = q.get()
             dataset = (
                 wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None, handler=wds.ignore_and_continue)
                 .decode(self.pt_decoder)
+                .shuffle(1000)
             )
             
             self.accelerator.wait_for_everyone()
@@ -185,9 +193,7 @@ class BucketSampler:
                     print(f"Process {self.process_index} gather error: {e}")
                     continue
             
-            # Clean up at end of shard
-            if os.path.exists(local_shard_path):
-                os.remove(local_shard_path)
+            self.cleanup_shard(local_shard_path)
             with num_tars.get_lock():
                 num_tars.value = num_tars.value - 1
 
@@ -234,7 +240,14 @@ class BucketSamplerExtractFeatures(BucketSampler):
         return res
 
     def process_element(self, elem):
-        img, caption = elem['jpg'], elem['txt']
+        if 'jpg' in elem.keys():
+            img = elem['jpg']
+        elif 'jpeg' in elem.keys():
+            img = elem['jpeg']
+        else:
+            img = elem['png']
+
+        caption = elem['txt']
         ratio = img.height / img.width
         ratio = self.find_closest_ratio(ratio)
         ratio = float(ratio)
@@ -276,4 +289,74 @@ class BucketSamplerExtractFeatures(BucketSampler):
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         ])
+
+class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
+    def __init__(self,
+                 folder,
+                 accelerator : Accelerator,
+                 batch_size : int,
+                 vae_max_batch_size : int,
+                 text_encoder_max_batch_size : int,
+                 model,
+                 cache_size : int,
+                 dreambooth_caption : str = None,
+                 local_temp_dir : str = 'temp'  
+                 ):
+        super().__init__(
+            None,
+            None,
+            accelerator,
+            batch_size,
+            None,
+            None,
+            None,
+            None,
+            vae_max_batch_size,
+            text_encoder_max_batch_size,
+            model,
+            cache_size,
+            local_temp_dir
+        )
+        self.folder = folder
+
+        # option to set all the images to the same caption
+        self.dreambooth_caption = dreambooth_caption
+
+        # this is a hack to reuse the existing code!
+        def download_shard_worker(self, q : mp.Queue, num_tars = mp.Value):
+            current_item = 0
+            while True:
+                with num_tars.get_lock():
+                    n = num_tars.value
+                if n >= self.cache_size:
+                    time.sleep(1.0)
+                    continue
+                q.put(self.folder)
+                with num_tars.get_lock():
+                    num_tars.value = num_tars.value + 1
+                current_item = current_item + 1
+        self.download_shard_proc = download_shard_worker
     
+    def cleanup_shard(self, local_shard_path):
+        # don't clean this up as this is our dataset!
+        pass
+
+    def process_element(self, elem):
+        if 'jpg' in elem.keys():
+            img = elem['jpg']
+        elif 'jpeg' in elem.keys():
+            img = elem['jpeg']
+        else:
+            img = elem['png']
+
+        if self.dreambooth_caption != None:
+            caption = self.dreambooth_caption
+        else:
+            caption = elem['txt']
+        
+        ratio = img.height / img.width
+        ratio = self.find_closest_ratio(ratio)
+        ratio = float(ratio)
+        if not ratio in self.buckets.keys():
+            self.add_bucket(ratio)
+        self.buckets[ratio].append((img, caption))
