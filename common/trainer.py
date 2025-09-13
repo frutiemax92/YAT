@@ -98,14 +98,18 @@ class Model:
         
         if params.dreambooth_dataset_folder != None:
             self.sampler = BucketSamplerDreambooth(
-                self.params.dreambooth_dataset_folder,
+                params.dreambooth_dataset_folder,
+                params.dreambooth_regularization_folder,
+                params.dreambooth_instance,
+                params.dreambooth_class,
+                params.dreambooth_num_repeats,
+                params.dreambooth_lambda,
                 self.accelerator,
                 params.batch_size,
                 params.vae_max_batch_size,
                 params.text_encoder_max_batch_size,
                 self,
                 cache_size=4,
-                dreambooth_caption=params.dreambooth_caption
             )
         elif params.compute_features == False:
             shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]

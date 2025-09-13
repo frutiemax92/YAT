@@ -104,16 +104,6 @@ class BucketSampler:
         if not ratio in self.buckets.keys():
             self.add_bucket(ratio)
         self.buckets[ratio].append((latent, emb))
-
-    def find_closest_ratio(self, ratio):
-        max_error = 1000.0
-        res = -1.0
-        for r in self.buckets.keys():
-            error = abs(ratio - r)
-            if error < max_error:
-                max_error = error
-                res = r
-        return res
     
     def get_next_shard_index(self):
         return random.randint(0, len(self.shards) - 1)
@@ -125,7 +115,35 @@ class BucketSampler:
         # Clean up at end of shard
         if os.path.exists(local_shard_path):
             os.remove(local_shard_path)
-        
+    
+    def get_invalid_bucket(self):
+        return [-1.0]
+    
+    def get_unique_ratios(self, dist_valid_buckets):
+        unique_ratios, counts = torch.unique(dist_valid_buckets, return_counts=True)
+        ratio_counts = {float(r): int(c) for r, c in zip(unique_ratios, counts) 
+                        if r != -1.0}
+        return ratio_counts
+    
+    def get_ratio_from_key(self, key):
+        return key
+    
+    def find_closest_ratio(self, ratio):
+        pass
+
+    def find_closest_key(self, ratio):
+        error = 1000
+        res = -1
+        for r in self.buckets.keys():
+            new_error = abs(ratio - r)
+            if new_error < error:
+                error = new_error
+                res = r
+        return res
+    
+    def get_local_shard_path(self, q : mp.Queue):
+        return q.get()
+    
     def __iter__(self):
         sync_counter = 0
         random.seed(self.process_index)
@@ -136,7 +154,7 @@ class BucketSampler:
         p = mp.Process(target=self.download_shard_proc, args=(self, q, num_tars))
         p.start()
         while True:
-            local_shard_path = q.get()
+            local_shard_path = self.get_local_shard_path(q)
             dataset = (
                 wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None, handler=wds.ignore_and_continue)
                 .decode(self.pt_decoder)
@@ -159,39 +177,45 @@ class BucketSampler:
                 
                 bucket_list = list(self.valid_buckets)
                 max_buckets = 100
-                bucket_list = bucket_list[:max_buckets] + [-1.0] * (max_buckets - len(bucket_list))
-                bucket_tensor = torch.tensor(bucket_list, device=self.device, dtype=torch.float32)
+
+                # Convert to list of [is_reg_pass, ratio]
+                bucket_arr = [
+                    [float(r[0]), float(r[1])] if isinstance(r, tuple) else [-1.0, float(r)]
+                    for r in bucket_list
+                ]
+
+                # Pad to fixed size
+                bucket_arr = bucket_arr[:max_buckets] + self.get_invalid_bucket() * (max_buckets - len(bucket_arr))
+                bucket_tensor = torch.tensor(bucket_arr, device=self.device, dtype=torch.float32)
                 
-                try:
-                    # Gather valid buckets across processes
-                    self.accelerator.wait_for_everyone()
-                    dist_valid_buckets = self.accelerator.gather(bucket_tensor)
-                    
-                    unique_ratios, counts = torch.unique(dist_valid_buckets, return_counts=True)
-                    ratio_counts = {float(r): int(c) for r, c in zip(unique_ratios, counts) 
-                                    if r != -1.0}
-                    
-                    for ratio, count in ratio_counts.items():
-                        if count >= self.num_processes:
-                            closest_ratio = self.find_closest_ratio(ratio)
-                            batch = ([self.buckets[closest_ratio][i][0] for i in range(self.batch_size)],
-                                    [self.buckets[closest_ratio][i][1] for i in range(self.batch_size)])
+                #try:
+                # Gather valid buckets across processes
+                self.accelerator.wait_for_everyone()
+                dist_valid_buckets = self.accelerator.gather(bucket_tensor)
+                ratio_counts = self.get_unique_ratios(dist_valid_buckets)
+                
+                for ratio, count in ratio_counts.items():
+                    if count >= self.num_processes:
+                        closest_ratio = self.find_closest_key(ratio)
+                        batch = ([self.buckets[closest_ratio][i][0] for i in range(self.batch_size)],
+                                [self.buckets[closest_ratio][i][1] for i in range(self.batch_size)])
+                        
+                        # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
+                        # as extracting features tends to use more VRAM than actually training the model
+                        # we freeze the vae and text encoder model
+                        ratio = self.get_ratio_from_key(closest_ratio)
+                        vae_features, embeddings = self.extract_features(batch, ratio)
+                        yield ratio, vae_features, embeddings
+                        
+                        # Clean up after yielding
+                        self.buckets[closest_ratio].clear()
+                        self.valid_buckets.remove(closest_ratio)
+                        self.accelerator.wait_for_everyone()
+                        break
                             
-                            # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
-                            # as extracting features tends to use more VRAM than actually training the model
-                            # we freeze the vae and text encoder model
-                            vae_features, embeddings = self.extract_features(batch, closest_ratio)
-                            yield closest_ratio, vae_features, embeddings
-                            
-                            # Clean up after yielding
-                            self.buckets[closest_ratio].clear()
-                            self.valid_buckets.remove(closest_ratio)
-                            self.accelerator.wait_for_everyone()
-                            break
-                            
-                except Exception as e:
-                    print(f"Process {self.process_index} gather error: {e}")
-                    continue
+                #except Exception as e:
+                    #print(f"Process {self.process_index} gather error: {e}")
+                    #continue
             
             self.cleanup_shard(local_shard_path)
             with num_tars.get_lock():
@@ -228,17 +252,17 @@ class BucketSamplerExtractFeatures(BucketSampler):
         self.cache_size = cache_size
         self.valid_shards = []
         self.keys = ['ratio', 'emb', 'latent']
-    
+
     def find_closest_ratio(self, ratio):
-        max_error = 1000.0
-        res = -1.0
-        for r in self.model.aspect_ratios:
-            error = abs(ratio - float(r))
-            if error < max_error:
-                max_error = error
+        error = 1000
+        res = -1
+        for r in self.model.aspect_ratios.keys():
+            new_error = abs(float(r) - ratio)
+            if new_error < error:
+                error = new_error
                 res = float(r)
         return res
-
+    
     def process_element(self, elem):
         if 'jpg' in elem.keys():
             img = elem['jpg']
@@ -249,8 +273,8 @@ class BucketSamplerExtractFeatures(BucketSampler):
 
         caption = elem['txt']
         ratio = img.height / img.width
-        ratio = self.find_closest_ratio(ratio)
         ratio = float(ratio)
+        ratio = self.find_closest_ratio(ratio)
         if not ratio in self.buckets.keys():
             self.add_bucket(ratio)
         self.buckets[ratio].append((img, caption))
@@ -292,14 +316,18 @@ class BucketSamplerExtractFeatures(BucketSampler):
 
 class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
     def __init__(self,
-                 folder,
+                 dreambooth_dataset_folder : str,
+                 dreambooth_regularization_folder : str,
+                 dreambooth_instance : str,
+                 dreambooth_class : str,
+                 dreambooth_num_repeats : int,
+                 dreambooth_lambda : float,
                  accelerator : Accelerator,
                  batch_size : int,
                  vae_max_batch_size : int,
                  text_encoder_max_batch_size : int,
                  model,
                  cache_size : int,
-                 dreambooth_caption : str = None,
                  local_temp_dir : str = 'temp'  
                  ):
         super().__init__(
@@ -317,10 +345,13 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
             cache_size,
             local_temp_dir
         )
-        self.folder = folder
-
-        # option to set all the images to the same caption
-        self.dreambooth_caption = dreambooth_caption
+        self.dreambooth_dataset_folder = dreambooth_dataset_folder
+        self.dreambooth_regularization_folder = dreambooth_regularization_folder
+        self.dreambooth_instance = dreambooth_instance
+        self.dreambooth_class = dreambooth_class
+        self.dreambooth_lambda = dreambooth_lambda
+        self.dreambooth_num_repeats = dreambooth_num_repeats
+        self.reg_shard = False
 
         # this is a hack to reuse the existing code!
         def download_shard_worker(self, q : mp.Queue, num_tars = mp.Value):
@@ -331,15 +362,29 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
                 if n >= self.cache_size:
                     time.sleep(1.0)
                     continue
-                q.put(self.folder)
-                with num_tars.get_lock():
-                    num_tars.value = num_tars.value + 1
+
+                if current_item % 2 == 0:
+                    for r in range(self.dreambooth_num_repeats):
+                        q.put((False, self.dreambooth_dataset_folder))
+                        with num_tars.get_lock():
+                            num_tars.value = num_tars.value + 1
+                else:
+                    q.put((True, self.dreambooth_regularization_folder))
+                    with num_tars.get_lock():
+                        num_tars.value = num_tars.value + 1
                 current_item = current_item + 1
         self.download_shard_proc = download_shard_worker
     
     def cleanup_shard(self, local_shard_path):
-        # don't clean this up as this is our dataset!
         pass
+
+    def get_local_shard_path(self, q : mp.Queue):
+        is_reg, path = q.get()
+        self.reg_shard = is_reg
+        return path
+
+    def get_invalid_bucket(self):
+        return [(-1.0, -1.0)]
 
     def process_element(self, elem):
         if 'jpg' in elem.keys():
@@ -349,14 +394,61 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
         else:
             img = elem['png']
 
-        if self.dreambooth_caption != None:
-            caption = self.dreambooth_caption
-        else:
+        if 'txt' in elem.keys():
             caption = elem['txt']
+        elif self.reg_shard == True:
+            caption = self.dreambooth_class
+        else:
+            caption = self.dreambooth_instance + ' ' + self.dreambooth_class
         
         ratio = img.height / img.width
-        ratio = self.find_closest_ratio(ratio)
         ratio = float(ratio)
+        ratio = self.find_closest_ratio(ratio)
+
+        ratio = (float(self.reg_shard), ratio)
         if not ratio in self.buckets.keys():
             self.add_bucket(ratio)
         self.buckets[ratio].append((img, caption))
+
+    def get_ratio_from_key(self, key):
+        if bool(key[0]) == True:
+            new_lr = self.model.params.learning_rate * self.dreambooth_lambda
+        else:
+            new_lr = self.model.params.learning_rate
+        for param_group in self.model.optimizer.param_groups:
+            param_group["lr"] = new_lr
+        return key[1]
+
+    def find_closest_key(self, ratio):
+        error = 1000
+        res = -1
+        for r in self.buckets.keys():
+            if r[0] != ratio[0]:
+                continue
+            new_error = abs(ratio[1] - r[1])
+            if new_error < error:
+                error = new_error
+                res = r
+        return res
+    
+    def get_transform(self, bucket):
+        aspect_ratio = self.model.aspect_ratios[str(bucket)]
+        target_height = int(aspect_ratio[0])
+        target_width = int(aspect_ratio[1])
+        return transforms.Compose([
+            transforms.Resize((target_height, target_width)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        ])
+    
+    def get_unique_ratios(self, dist_valid_buckets):
+        # Get unique (is_reg_pass, ratio) pairs row-wise
+        unique_pairs, counts = torch.unique(dist_valid_buckets, return_counts=True, dim=0)
+
+        # Convert to dictionary: {(is_reg_pass, ratio): count}
+        ratio_counts = {
+            (int(pair[0].item()), float(pair[1].item())): int(c.item())
+            for pair, c in zip(unique_pairs, counts)
+            if pair[1].item() != -1.0  # filter invalid ratio
+        }
+        return ratio_counts

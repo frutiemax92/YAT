@@ -180,8 +180,10 @@ class TrainingParameters:
         self.dreambooth_dataset_folder = None
         if 'dreambooth_dataset_folder' in yaml_root.keys():
             self.dreambooth_dataset_folder = yaml_root['dreambooth_dataset_folder']
-        
-        self.dreambooth_caption = yaml_root['dreambooth_caption'] if 'dreambooth_caption' in yaml_root.keys() else None
+        self.dreambooth_num_repeats = int(yaml_root['dreambooth_num_repeats']) if 'dreambooth_num_repeats' in yaml_root.keys() else 1
+        self.dreambooth_instance = yaml_root['dreambooth_instance'] if 'dreambooth_instance' in yaml_root.keys() else None
+        self.dreambooth_class = yaml_root['dreambooth_class'] if 'dreambooth_class' in yaml_root.keys() else None
+        self.dreambooth_regularization_folder = yaml_root['dreambooth_regularization_folder'] if 'dreambooth_regularization_folder' in yaml_root.keys() else None
 
 if __name__ == '__main__':
     params = TrainingParameters()
