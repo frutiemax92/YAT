@@ -180,7 +180,7 @@ class BucketSampler:
 
                 # Convert to list of [is_reg_pass, ratio]
                 bucket_arr = [
-                    [float(r[0]), float(r[1])] if isinstance(r, tuple) else [-1.0, float(r)]
+                    [float(r[0]), float(r[1])] if isinstance(r, tuple) else float(r)
                     for r in bucket_list
                 ]
 
