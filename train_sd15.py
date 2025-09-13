@@ -165,17 +165,6 @@ class SD15Model(Model):
         
         target = noise
         loss = loss_fn(noise_pred.float(), target.float())
-
-        # preservation loss when training lora models
-        if self.params.dreambooth_lambda != None:
-            self.model.disable_adapter_layers()
-            noise_pred_preserv = self.model(
-                noisy_model_input,
-                encoder_hidden_states=embeddings,
-                timestep=timesteps
-            ).sample
-            self.model.enable_adapter_layers()
-            loss = loss + self.params.dreambooth_lambda * loss_fn(noise_pred, noise_pred_preserv)
         return loss  # Already in bfloat16 since inputs were bfloat16
         
 if __name__ == '__main__':
