@@ -18,7 +18,9 @@ import multiprocessing as mp
 import time
 import random
 from PIL import Image
+from PIL import ImageFile
 
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 def flush():
     gc.collect()
@@ -36,6 +38,7 @@ class BucketSampler:
                  r2_endpoint : str,
                  r2_bucket_name : str,
                  cache_size : int,
+                 seed : int,
                  local_temp_dir : str = 'temp'  
                  ):
         self.process_index = accelerator.process_index
@@ -46,6 +49,7 @@ class BucketSampler:
         self.buckets = {}
         self.valid_buckets = set()
         self.ready_bucket = -1.0
+        self.seed = seed
 
         self.batch_size = batch_size
         self.r2_access_key = r2_access_key
@@ -55,7 +59,6 @@ class BucketSampler:
         self.local_temp_dir = local_temp_dir
         self.features_path = features_path
         self.cache_size = cache_size
-        self.keys = ['jpg', 'txt']
 
         def download_shard_worker(self, q : mp.Queue, num_tars = mp.Value):
             current_item = 0
@@ -86,11 +89,11 @@ class BucketSampler:
         os.makedirs(self.local_temp_dir, exist_ok=True)
 
     def pt_decoder(self, key, value):
-        if key.endswith(".pt"):
+        if key.endswith("pt"):
             return torch.load(io.BytesIO(value), map_location="cpu")
-        elif key.endswith(".txt"):
+        elif key.endswith("txt"):
             return value.decode("utf-8")
-        elif key.endswith((".jpg", ".jpeg", ".png")):
+        elif key in (".jpg", ".jpeg", ".png"):
             return Image.open(io.BytesIO(value)).convert("RGB")
         else:
             return value
@@ -146,7 +149,7 @@ class BucketSampler:
     
     def __iter__(self):
         sync_counter = 0
-        random.seed(self.process_index)
+        random.seed(self.process_index + self.seed)
         
         # start the download process
         q = mp.Queue()
@@ -156,13 +159,12 @@ class BucketSampler:
         while True:
             local_shard_path = self.get_local_shard_path(q)
             dataset = (
-                wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None, handler=wds.ignore_and_continue)
-                .decode(self.pt_decoder)
+                wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None)
                 .shuffle(1000)
+                .decode(self.pt_decoder)
             )
             
             self.accelerator.wait_for_everyone()
-            print(f'proc:{self.process_index} after wait')
             for elem in dataset:
                 self.process_element(elem)
                 
@@ -234,6 +236,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
                  vae_max_batch_size : int,
                  text_encoder_max_batch_size : int,
                  model,
+                 seed,
                  cache_size : int,
                  local_temp_dir : str = 'temp'  
                  ):
@@ -245,13 +248,13 @@ class BucketSamplerExtractFeatures(BucketSampler):
                          r2_secret_key,
                          r2_endpoint,
                          r2_bucket_name,
-                         local_temp_dir)
+                         local_temp_dir,
+                         seed)
         self.vae_max_batch_size = vae_max_batch_size
         self.text_encoder_max_batch_size = text_encoder_max_batch_size
         self.model = model
         self.cache_size = cache_size
         self.valid_shards = []
-        self.keys = ['ratio', 'emb', 'latent']
 
     def find_closest_ratio(self, ratio):
         error = 1000
@@ -327,6 +330,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
                  vae_max_batch_size : int,
                  text_encoder_max_batch_size : int,
                  model,
+                 seed,
                  cache_size : int,
                  local_temp_dir : str = 'temp'  
                  ):
@@ -342,6 +346,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
             vae_max_batch_size,
             text_encoder_max_batch_size,
             model,
+            seed,
             cache_size,
             local_temp_dir
         )

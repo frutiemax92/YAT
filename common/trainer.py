@@ -109,6 +109,7 @@ class Model:
                 params.vae_max_batch_size,
                 params.text_encoder_max_batch_size,
                 self,
+                params.dataset_seed,
                 cache_size=4,
             )
         elif params.compute_features == False:
@@ -121,6 +122,7 @@ class Model:
                             params.r2_secret_key,
                             params.r2_endpoint,
                             params.r2_bucket_name,
+                            params.dataset_seed,
                             cache_size=4)
         else:
             shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
@@ -135,6 +137,7 @@ class Model:
                             params.vae_max_batch_size,
                             params.text_encoder_max_batch_size,
                             self,
+                            params.dataset_seed,
                             cache_size=4)
         #self.sampler = self.accelerator.prepare(self.sampler)
         
@@ -147,7 +150,8 @@ class Model:
                     config = LoraConfig(r=params.lora_rank,
                                         lora_dropout=params.lora_dropout,
                                         target_modules=params.lora_target_modules,
-                                        lora_alpha=params.lora_alpha)
+                                        lora_alpha=params.lora_alpha,
+                                        use_dora=params.lora_use_dora)
                 elif params.lora_algo == 'loha':
                     config = LoHaConfig(r=params.lora_rank,
                                         module_dropout=params.lora_dropout,
@@ -157,8 +161,7 @@ class Model:
                     config = LoKrConfig(r=params.lora_rank,
                                         module_dropout=params.lora_dropout,
                                         target_modules=params.lora_target_modules,
-                                        alpha=params.lora_alpha,
-                                        use_effective_conv2d=True)
+                                        alpha=params.lora_alpha)
                 self.model = get_peft_model(self.model, config).to(dtype=dtype)
                 
             else:

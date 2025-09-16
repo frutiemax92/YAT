@@ -118,6 +118,8 @@ class TrainingParameters:
         if 'use_ema' in yaml_root.keys():
             self.use_ema = True
         
+        self.lora_use_dora = 'lora_use_dora' in yaml_root.keys()
+        
         # train using unconditional steps probability
         self.train_unconditional_prob = 0.0
         if 'train_unconditional_prob' in yaml_root.keys():
