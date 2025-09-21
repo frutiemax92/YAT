@@ -13,7 +13,7 @@ import tqdm
 from copy import deepcopy
 import bitsandbytes as bnb
 from peft import LoraConfig, get_peft_model, PeftModel
-from peft import LoHaConfig, LoKrConfig
+from peft import LoHaConfig, LoKrConfig, FourierFTConfig
 from accelerate.data_loader import prepare_data_loader
 from torchvision.transforms import Resize
 from accelerate.utils import DataLoaderConfiguration
@@ -162,8 +162,9 @@ class Model:
                                         module_dropout=params.lora_dropout,
                                         target_modules=params.lora_target_modules,
                                         alpha=params.lora_alpha)
+                elif params.lora_algo == 'fourierft':
+                    config = FourierFTConfig(target_modules=params.lora_target_modules, init_weights=True, n_frequency=8000, scaling=10.0)
                 self.model = get_peft_model(self.model, config).to(dtype=dtype)
-                
             else:
                 self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True)
                 self.model.print_trainable_parameters()
