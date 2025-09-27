@@ -150,7 +150,7 @@ class Model:
                                         target_modules=params.lora_target_modules,
                                         alpha=params.lora_alpha)
                 elif params.lora_algo == 'fourierft':
-                    config = FourierFTConfig(target_modules=params.lora_target_modules, init_weights=True, alpha=0.01, scaling=1.0, ifft2_norm='ortho')
+                    config = FourierFTConfig(target_modules=params.lora_target_modules, init_weights=True, alpha=0.1, scaling=1.0, ifft2_norm='ortho')
                 self.model = get_peft_model(self.model, config).to(dtype=dtype)
             else:
                 self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True)
@@ -236,7 +236,7 @@ class Model:
                     if prob < self.params.train_unconditional_prob:
                         # put the embeddings to the empty one
                         for idx in range(len(embeddings)):
-                            embeddings[idx] = self.empty_embeddings
+                            embeddings[idx] = self.empty_embeddings[0]
                     loss = self.optimize(ratio, latents, embeddings)
                     
                     # # check if we are using repa
