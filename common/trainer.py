@@ -1,35 +1,20 @@
-import PIL.Image
 from common.training_parameters_reader import TrainingParameters
-from common.cloudflare import get_secured_urls
 from accelerate import Accelerator
 import webdataset as wds
 from torch.utils.data import DataLoader
 from common.bucket_sampler import BucketSampler, BucketSamplerExtractFeatures, BucketSamplerDreambooth
 from torch.utils.tensorboard import SummaryWriter
-from webdataset.utils import pytorch_worker_info
-from torch.optim.adamw import AdamW
 import torch
 import tqdm
-from copy import deepcopy
-import bitsandbytes as bnb
 from peft import LoraConfig, get_peft_model, PeftModel
 from peft import LoHaConfig, LoKrConfig, FourierFTConfig
-from accelerate.data_loader import prepare_data_loader
-from torchvision.transforms import Resize
-from accelerate.utils import DataLoaderConfiguration
-import torch.distributed as dist
-from torch.optim.lr_scheduler import CyclicLR
-import shutil
 import os
-import PIL
 from diffusers.training_utils import EMAModel
-from common.cache import CacheFeaturesCompute, CacheLoadFeatures
 from transformers import AutoImageProcessor, AutoModel
 import random
-import io
 from torch.optim.lr_scheduler import LambdaLR
-from transformers import get_scheduler
 import os
+from diffusers import SanaTransformer2DModel
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
@@ -86,7 +71,9 @@ class Model:
     
     def initialize(self):
         # use flash attention
-        self.pipe.enable_xformers_memory_efficient_attention()
+        # sana's transformer cannot use this
+        if not isinstance(self.model,  SanaTransformer2DModel):
+            self.pipe.enable_xformers_memory_efficient_attention()
         params = self.params
         if self.accelerator.is_main_process:
             self.logger = SummaryWriter()
@@ -163,7 +150,7 @@ class Model:
                                         target_modules=params.lora_target_modules,
                                         alpha=params.lora_alpha)
                 elif params.lora_algo == 'fourierft':
-                    config = FourierFTConfig(target_modules=params.lora_target_modules, init_weights=True, alpha=0.01, scaling=1.0)
+                    config = FourierFTConfig(target_modules=params.lora_target_modules, init_weights=True, alpha=0.01, scaling=1.0, ifft2_norm='ortho')
                 self.model = get_peft_model(self.model, config).to(dtype=dtype)
             else:
                 self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True)

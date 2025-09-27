@@ -304,7 +304,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
                 end_index = min(len(batch[1]), i+self.text_encoder_max_batch_size)
                 captions = batch[1][i:i+self.text_encoder_max_batch_size]
                 embeds = self.model.extract_embeddings(captions)
-                embeddings.append(embeds)
+                embeddings.extend(embeds)
         return torch.stack(vae_features), embeddings
     
     def get_transform(self, bucket):

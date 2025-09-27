@@ -76,7 +76,7 @@ class SDXLModel(Model):
                                 do_classifier_free_guidance=False,
                                 device=self.accelerator.device,
                                 num_images_per_prompt=1)
-        return (prompt_embeds, pooled_prompt_embeds)
+        return [(prompt_embeds[idx], pooled_prompt_embeds[idx]) for idx in range(len(prompt_embeds))]
     
     def validate(self):
         params = self.params
