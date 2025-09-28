@@ -1,7 +1,7 @@
 import argparse
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_256_BIN, ASPECT_RATIO_512_BIN, ASPECT_RATIO_1024_BIN
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_2048_BIN
-from diffusers import SanaTransformer2DModel, FlowMatchEulerDiscreteScheduler
+from diffusers import SanaTransformer2DModel, FlowMatchEulerDiscreteScheduler, DPMSolverMultistepScheduler
 from diffusers.training_utils import compute_density_for_timestep_sampling
 from diffusers import SanaPipeline, SanaPAGPipeline, AutoencoderDC
 from utils.patched_sana_transformer import PatchedSanaTransformer2DModel, patch_sana_attention_layers
@@ -195,7 +195,20 @@ class SanaModel(Model):
         u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=1.29)
         indices = (u * self.scheduler.config.num_train_timesteps).long()
         timesteps = self.scheduler.timesteps[indices].to(self.accelerator.device)
-        noisy_model_input = self.scheduler.scale_noise(latents, timesteps, noise)
+
+        def get_sigmas(timesteps, n_dim=4, dtype=torch.float32):
+            sigmas = self.scheduler.sigmas.to(device=self.accelerator.device, dtype=dtype)
+            schedule_timesteps = self.scheduler.timesteps.to(self.accelerator.device)
+            timesteps = timesteps.to(self.accelerator.device)
+            step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+
+            sigma = sigmas[step_indices].flatten()
+            while len(sigma.shape) < n_dim:
+                sigma = sigma.unsqueeze(-1)
+            return sigma
+        
+        sigmas = get_sigmas(timesteps, latents.ndim, dtype=latents.dtype)
+        noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
 
         # Keep everything in bfloat16
         noise_pred = self.model(
