@@ -150,7 +150,7 @@ class Model:
                                         target_modules=params.lora_target_modules,
                                         alpha=params.lora_alpha)
                 elif params.lora_algo == 'fourierft':
-                    config = FourierFTConfig(target_modules=params.lora_target_modules, init_weights=True, alpha=0.1, scaling=1.0, ifft2_norm='ortho')
+                    config = FourierFTConfig(target_modules=params.lora_target_modules, init_weights=True, alpha=0.01, scaling=1.0, ifft2_norm='ortho')
                 self.model = get_peft_model(self.model, config).to(dtype=dtype)
             else:
                 self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True)
@@ -273,8 +273,9 @@ class Model:
 
                     avg_loss = avg_loss + loss
                     self.accelerator.backward(loss)
-                    self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    
+
+                    if self.accelerator.sync_gradients:
+                        self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                     self.optimizer.step()
 
                     if self.ema_model != None:
