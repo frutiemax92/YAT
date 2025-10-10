@@ -20,7 +20,7 @@ class SanaModel(Model):
         #self.patch()
         if params.pretrained_model_path != None:
             transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path) 
-            self.pipe.transformer = transformer
+            self.pipe.transformer = transformer.to(torch.bfloat16)
         
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
         self.pipe.vae.train(False)
@@ -107,16 +107,7 @@ class SanaModel(Model):
         text_encoder = self.pipe.text_encoder
         transformer = self.pipe.transformer
         scheduler = self.pipe.scheduler
-        if params.low_vram:
-            vae = vae.cpu()
-            transformer = transformer.cpu()
-            self.pipe.vae = None
-            self.pipe.transformer = None
-            torch.cuda.empty_cache()
-
-        # convert to float16 as inference with bfloat16 is unstable
-        self.pipe.to(dtype=torch.float16, device=self.accelerator.device)
-
+        
         pil_to_tensor = PILToTensor()
         idx = 0
         generator=torch.Generator(device="cuda").manual_seed(42)

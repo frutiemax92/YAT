@@ -150,10 +150,10 @@ class Model:
                                         target_modules=params.lora_target_modules,
                                         alpha=params.lora_alpha)
                 elif params.lora_algo == 'fourierft':
-                    config = FourierFTConfig(target_modules=params.lora_target_modules, init_weights=True, alpha=0.01, scaling=1.0, ifft2_norm='ortho')
+                    config = FourierFTConfig(target_modules=params.lora_target_modules, init_weights=True, alpha=0.005, scaling=1.0, ifft2_norm='ortho')
                 self.model = get_peft_model(self.model, config).to(dtype=dtype)
             else:
-                self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True)
+                self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True).to(dtype=dtype)
                 self.model.print_trainable_parameters()
 
         params_to_optimizer = self.model.parameters()
