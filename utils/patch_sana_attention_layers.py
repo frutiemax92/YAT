@@ -123,19 +123,10 @@ def unfreeze_sana_blocks(transformer, layers : list[int]):
             param.requires_grad = True
 
 def patch_sana_attention_layers(transformer, layers : list[int]):
-    # freeze the whole model first
-    for param in transformer.parameters():
-        param.requires_grad = False
-
     for idx in layers:
         block = transformer.transformer_blocks[idx]
         block.attn1.set_processor(AttnProcessor2_0())
         block.attn2.set_processor(AttnProcessor2_0())
-        
-        # Unfreeze the new block
-        for param in block.parameters():
-            param.requires_grad = True
-
         transformer.transformer_blocks[idx] = block
     
     modified_blocks = transformer.config.modified_blocks
