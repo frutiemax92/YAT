@@ -1,7 +1,7 @@
 numpy==1.26.4
 xformers
-diffusers>=0.32.0.dev
-transformers
+diffusers==0.33.0
+transformers==4.55.0
 accelerate
 beautifulsoup4
 ftfy
