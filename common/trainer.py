@@ -209,27 +209,7 @@ class Model:
 
         while self.global_step < self.params.steps:
             # then go through the cache items
-            for ratio, latents, embeddings in self.sampler:
-                if self.global_step % params.num_steps_per_validation == 0:
-                    with torch.no_grad():
-                        # ✅ Run reduction on ALL processes to sync EMA parameters
-                        if self.ema_model != None:
-                            for param in self.ema_model.shadow_params:
-                                self.accelerator.reduce(param.data, reduction="mean")
-                
-                        # ✅ Ensure store() is called before restore()
-                        if self.accelerator.is_main_process:
-                            if self.ema_model != None:
-                                self.ema_model.store(self.model.parameters())  # Store original model weights
-                                self.ema_model.copy_to(self.model.parameters())
-                
-                            self.validate()
-                            self.save_model()
-                
-                            if self.ema_model != None:
-                                self.ema_model.restore(self.model.parameters())
-                    self.accelerator.wait_for_everyone()
-                
+            for ratio, latents, embeddings in self.sampler:    
                 with self.accelerator.accumulate(self.model):
                     # randomly train with the unconditional embedding
                     prob = random.random()
@@ -297,7 +277,28 @@ class Model:
                                 self.logger.add_scalar('train/lr', last_lr[0], self.global_step)
                         except OSError as e:
                             print(f"[Warning] TensorBoard logging failed: {e}")
+
+                    if self.global_step % params.num_steps_per_validation == 0:
+                        with torch.no_grad():
+                            # ✅ Run reduction on ALL processes to sync EMA parameters
+                            if self.ema_model != None:
+                                for param in self.ema_model.shadow_params:
+                                    self.accelerator.reduce(param.data, reduction="mean")
+                    
+                            # ✅ Ensure store() is called before restore()
+                            if self.accelerator.is_main_process:
+                                if self.ema_model != None:
+                                    self.ema_model.store(self.model.parameters())  # Store original model weights
+                                    self.ema_model.copy_to(self.model.parameters())
+                    
+                                self.validate()
+                                self.save_model()
+                    
+                                if self.ema_model != None:
+                                    self.ema_model.restore(self.model.parameters())
+                        self.accelerator.wait_for_everyone()
+                    
                     progress_bar.update(1)
-                self.global_step = self.global_step + 1
+                    self.global_step = self.global_step + 1
             # if hasattr(self, 'repa_model'):
             #     self.repa_model.cpu()
