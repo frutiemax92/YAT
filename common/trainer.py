@@ -15,6 +15,7 @@ import random
 from torch.optim.lr_scheduler import LambdaLR
 import os
 from diffusers import SanaTransformer2DModel
+from utils.patched_sana_transformer import PatchedSanaTransformer2DModel
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
@@ -72,7 +73,7 @@ class Model:
     def initialize(self):
         # use flash attention
         # sana's transformer cannot use this
-        if not isinstance(self.model,  SanaTransformer2DModel):
+        if not isinstance(self.model,  SanaTransformer2DModel) and not isinstance(self.model, PatchedSanaTransformer2DModel):
             self.pipe.enable_xformers_memory_efficient_attention()
         params = self.params
         if self.accelerator.is_main_process:
