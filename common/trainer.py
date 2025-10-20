@@ -16,6 +16,7 @@ from torch.optim.lr_scheduler import LambdaLR
 import os
 from diffusers import SanaTransformer2DModel
 from utils.patched_sana_transformer import PatchedSanaTransformer2DModel
+import math
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
@@ -170,7 +171,11 @@ class Model:
             def lr_lambda(current_step):
                 if current_step < warmup_steps:
                     return float(current_step) / float(max(1, warmup_steps))
-                return 1.0  # full LR after warmup
+                amp = (1.0 - 0.1) / 2.0
+                mid = 1.0 - amp
+                return mid + amp * math.cos(
+                    2 * math.pi * current_step / self.params.num_steps_per_validation
+                )
             self.lr_scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
 
         # apply EMA
