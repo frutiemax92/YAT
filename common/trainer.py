@@ -215,7 +215,10 @@ class Model:
 
         while self.global_step < self.params.steps:
             # then go through the cache items
-            for ratio, latents, embeddings in self.sampler:    
+            for batch in self.sampler:
+                ratio = batch.ratio
+                latents = batch.vae_features
+                embeddings = batch.embeddings    
                 with self.accelerator.accumulate(self.model):
                     # randomly train with the unconditional embedding
                     prob = random.random()

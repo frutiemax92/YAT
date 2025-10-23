@@ -26,6 +26,12 @@ def flush():
     gc.collect()
     torch.cuda.empty_cache()
 
+class Batch:
+    def __init__(self):
+        self.embeddings = None
+        self.vae_features = None
+        self.repa_features = None
+        self.ratio = None
 
 class BucketSampler:
     def __init__(self,
@@ -207,7 +213,13 @@ class BucketSampler:
                         # we freeze the vae and text encoder model
                         ratio = self.get_ratio_from_key(closest_ratio)
                         vae_features, embeddings = self.extract_features(batch, ratio)
-                        yield ratio, vae_features, embeddings
+
+                        batch = Batch()
+                        batch.ratio = ratio
+                        batch.embeddings = embeddings
+                        batch.vae_features = vae_features
+
+                        yield batch
                         
                         # Clean up after yielding
                         self.buckets[closest_ratio].clear()

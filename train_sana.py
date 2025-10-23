@@ -5,6 +5,7 @@ from diffusers import SanaTransformer2DModel, FlowMatchEulerDiscreteScheduler, D
 from diffusers.training_utils import compute_density_for_timestep_sampling
 from diffusers import SanaPipeline, SanaPAGPipeline, AutoencoderDC
 from utils.patched_sana_transformer import PatchedSanaTransformer2DModel, patch_sana_attention_layers
+from utils.patch_sana_attention_layers import unfreeze_sana_blocks
 import torch
 import tqdm
 from torchvision.transforms import PILToTensor
@@ -40,6 +41,8 @@ class SanaModel(Model):
             # enable vae tiling for this resolution
             self.pipe.vae.enable_tiling(tile_sample_min_width=1024, tile_sample_min_height=1024)
 
+        #self.patch()
+
         self.pipe.transformer.to(torch.bfloat16)
         self.pipe.text_encoder.to(torch.bfloat16)
         self.pipe.vae.to(torch.bfloat16)
@@ -48,11 +51,9 @@ class SanaModel(Model):
         self.model.enable_gradient_checkpointing()
     
     def patch(self):
-        config = SanaTransformer2DModel.load_config(self.params.pretrained_pipe_path, subfolder='transformer')
-        config['interpolation_scale'] = 1.0
-        self.pipe.transformer = PatchedSanaTransformer2DModel.from_config(config)
-        depth = self.pipe.transformer.config.num_layers
-        patch_sana_attention_layers(self.pipe.transformer, [i for i in range(depth)])
+        self.pipe.transformer = PatchedSanaTransformer2DModel.from_pretrained(self.params.pretrained_pipe_path, subfolder='transformer')
+        self.pipe.transformer = patch_sana_attention_layers(self.pipe.transformer, [0])
+        unfreeze_sana_blocks(transformer=self.pipe.transformer, layers=[0, 1, 2])
     
     def initialize(self):
         super().initialize()

@@ -134,5 +134,6 @@ def patch_sana_attention_layers(transformer, layers : list[int]):
         if not l in modified_blocks:
             modified_blocks.append(l)
     transformer.register_to_config(modified_blocks = modified_blocks)
+    return transformer
 
 
