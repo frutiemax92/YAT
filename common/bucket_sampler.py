@@ -14,6 +14,7 @@ import argparse
 from common.training_parameters_reader import TrainingParameters
 from collections import deque
 import io
+from transformers import AutoImageProcessor, AutoModel
 import multiprocessing as mp
 import time
 import random
@@ -45,6 +46,7 @@ class BucketSampler:
                  r2_bucket_name : str,
                  cache_size : int,
                  seed : int,
+                 use_repa : bool = False,
                  local_temp_dir : str = 'temp'  
                  ):
         self.process_index = accelerator.process_index
@@ -56,7 +58,7 @@ class BucketSampler:
         self.valid_buckets = set()
         self.ready_bucket = -1.0
         self.seed = seed
-
+        self.use_repa = use_repa
         self.batch_size = batch_size
         self.r2_access_key = r2_access_key
         self.r2_secret_key = r2_secret_key
@@ -93,6 +95,11 @@ class BucketSampler:
                 current_item = current_item + 1
         self.download_shard_proc = download_shard_worker
         os.makedirs(self.local_temp_dir, exist_ok=True)
+
+        if use_repa:
+            self.repa_processor = AutoImageProcessor.from_pretrained('facebook/dinov2-base')
+            self.repa_model = AutoModel.from_pretrained('facebook/dinov2-base').to(torch.bfloat16)
+            self.repa_model.to(self.accelerator.device)
 
     def pt_decoder(self, key, value):
         if key.endswith("pt"):
@@ -212,12 +219,14 @@ class BucketSampler:
                         # as extracting features tends to use more VRAM than actually training the model
                         # we freeze the vae and text encoder model
                         ratio = self.get_ratio_from_key(closest_ratio)
-                        vae_features, embeddings = self.extract_features(batch, ratio)
+                        vae_features, embeddings, repa_features = self.extract_features(batch, ratio)
 
                         batch = Batch()
                         batch.ratio = ratio
                         batch.embeddings = embeddings
                         batch.vae_features = vae_features
+                        if self.use_repa:
+                            batch.repa_features = repa_features
 
                         yield batch
                         
@@ -250,6 +259,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
                  model,
                  seed,
                  cache_size : int,
+                 use_repa : bool = False,
                  local_temp_dir : str = 'temp'  
                  ):
         super().__init__(shards,
@@ -261,7 +271,8 @@ class BucketSamplerExtractFeatures(BucketSampler):
                          r2_endpoint,
                          r2_bucket_name,
                          local_temp_dir,
-                         seed)
+                         seed,
+                         use_repa)
         self.vae_max_batch_size = vae_max_batch_size
         self.text_encoder_max_batch_size = text_encoder_max_batch_size
         self.model = model
@@ -292,6 +303,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
         ratio = self.find_closest_ratio(ratio)
         if not ratio in self.buckets.keys():
             self.add_bucket(ratio)
+
         self.buckets[ratio].append((img, caption))
     
     def extract_features(self, batch, ratio):
@@ -300,6 +312,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
         # we freeze the vae and text encoder model
         vae_features = []
         embeddings = []
+        repa_features = []
 
         transform = self.get_transform(ratio)
         with torch.no_grad():
@@ -317,7 +330,16 @@ class BucketSamplerExtractFeatures(BucketSampler):
                 captions = batch[1][i:i+self.text_encoder_max_batch_size]
                 embeds = self.model.extract_embeddings(captions)
                 embeddings.extend(embeds)
-        return torch.stack(vae_features), embeddings
+        
+            # check if we need to do repa
+            if self.use_repa:
+                images = batch[0]
+                inputs = self.repa_processor(images=images, return_tensors="pt")
+                inputs = inputs['pixel_values'].to(self.accelerator.device, dtype=torch.bfloat16)
+                outputs = self.repa_model(inputs)
+
+                repa_features = outputs.pooler_output
+        return torch.stack(vae_features), embeddings, repa_features
     
     def get_transform(self, bucket):
         aspect_ratio = self.model.aspect_ratios[str(bucket)]

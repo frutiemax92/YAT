@@ -166,9 +166,13 @@ class TrainingParameters:
 
         # REPA parameters
         self.use_repa = 'use_repa' in yaml_root.keys()
-        self.repa_lambda = 0.5
+        self.repa_lambda = 0.05
         if 'repa_lambda' in yaml_root.keys():
             self.repa_lambda = float(yaml_root['repa_lambda'])
+
+        self.repa_pretrained_model = None
+        if 'repa_pretrained_model' in yaml_root.keys():
+            self.repa_pretrained_model = yaml_root['repa_pretrained_model']
         
         self.save_to_disk = False
         if 'save_to_disk' in yaml_root.keys():
