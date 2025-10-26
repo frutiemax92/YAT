@@ -47,6 +47,9 @@ class Model:
                 # in the case of less shards than GPUs, repeat the images on all gpus
                 self.shard_index_begin = 0
                 self.shard_index_end = self.params.num_shards
+        else:
+            self.shard_index_begin = 0
+            self.shard_index_end = self.params.num_shards
         
         self.global_step = 0
 
@@ -75,6 +78,7 @@ class Model:
     def initialize(self):
         # use flash attention
         # sana's transformer cannot use this
+        torch.backends.cuda.enable_flash_sdp(True)
         if not isinstance(self.model,  SanaTransformer2DModel) and not isinstance(self.model, PatchedSanaTransformer2DModel):
             self.pipe.enable_xformers_memory_efficient_attention()
         params = self.params
@@ -87,6 +91,7 @@ class Model:
             self.logger = None
         
         if params.dreambooth_dataset_folder != None:
+            shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
             self.sampler = BucketSamplerDreambooth(
                 params.dreambooth_dataset_folder,
                 params.dreambooth_regularization_folder,
@@ -101,6 +106,11 @@ class Model:
                 self,
                 params.dataset_seed,
                 cache_size=4,
+                r2_access_key=self.params.r2_access_key,
+                r2_bucket_name=self.params.r2_bucket_name,
+                r2_endpoint=self.params.r2_endpoint,
+                r2_secret_key=self.params.r2_secret_key,
+                shards=shards
             )
         elif params.compute_features == False:
             shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
@@ -154,7 +164,7 @@ class Model:
                                         target_modules=params.lora_target_modules,
                                         alpha=params.lora_alpha)
                 elif params.lora_algo == 'fourierft':
-                    config = FourierFTConfig(target_modules=params.lora_target_modules, init_weights=True, alpha=0.005, scaling=1.0, ifft2_norm='ortho')
+                    config = FourierFTConfig(target_modules=params.lora_target_modules, init_weights=True, alpha=0.01, scaling=1.0, ifft2_norm='ortho')
                 self.model = get_peft_model(self.model, config).to(dtype=dtype)
             else:
                 self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True).to(dtype=dtype)
@@ -192,7 +202,8 @@ class Model:
 
         # check if we use repa
         if self.params.use_repa:
-            repa_config = RepaConfig(target_modules=['transformer_blocks.8'], hidden_shape=[1152])
+            repa_config = RepaConfig(target_modules=['transformer_blocks.0', 'transformer_blocks.1', 'transformer_blocks.2'], 
+                                     hidden_shape=[1152, 1152, 1152])
 
             if self.params.repa_pretrained_model == None:
                 self.model = RepaModel(self.model, repa_config)

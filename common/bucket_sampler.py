@@ -366,17 +366,22 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
                  model,
                  seed,
                  cache_size : int,
-                 local_temp_dir : str = 'temp'  
-                 ):
+                 local_temp_dir : str = 'temp',
+                 r2_access_key : str = None,
+                 r2_secret_key : str = None,
+                 r2_endpoint : str = None,
+                 r2_bucket_name : str = None,
+                 shards : list[str] = None,
+        ):
         super().__init__(
-            None,
-            None,
+            shards,
+            dreambooth_regularization_folder,
             accelerator,
             batch_size,
-            None,
-            None,
-            None,
-            None,
+            r2_access_key,
+            r2_secret_key,
+            r2_endpoint,
+            r2_bucket_name,
             vae_max_batch_size,
             text_encoder_max_batch_size,
             model,
@@ -408,9 +413,26 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
                         with num_tars.get_lock():
                             num_tars.value = num_tars.value + 1
                 else:
-                    q.put((True, self.dreambooth_regularization_folder))
-                    with num_tars.get_lock():
-                        num_tars.value = num_tars.value + 1
+                    # we get the regularization images either from a local folder or a bucket on the cloud
+                    if self.r2_bucket_name == None:
+                        q.put((True, self.dreambooth_regularization_folder))
+                    else:
+                        current_shard_index = self.get_next_shard_index()
+                        dataset_url = get_secured_urls(self.r2_access_key,
+                                    self.r2_secret_key,
+                                    self.r2_endpoint,
+                                    self.r2_bucket_name,
+                                    [self.features_path + '/' + self.shards[current_shard_index]]
+                                    )[0]
+                        local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
+                        try:
+                            download_tar(dataset_url, local_shard_path)
+                        except:
+                            current_shard_index = self.get_next_shard_index()
+                            continue
+                        q.put((True, local_shard_path))
+                with num_tars.get_lock():
+                    num_tars.value = num_tars.value + 1
                 current_item = current_item + 1
         self.download_shard_proc = download_shard_worker
     

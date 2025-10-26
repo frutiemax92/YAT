@@ -33,7 +33,7 @@ def get_secured_urls(r2_access_key : str,
         ExpiresIn=604800
     ) for tar_file in r2_tar_files]
 
-def download_tar(url, local_path, max_total_time=60):
+def download_tar(url, local_path, max_total_time=240):
     start_time = time.time()
 
     # if we don't get any chunk under 60 seconds, raise an exception!

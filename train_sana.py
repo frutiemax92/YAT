@@ -17,8 +17,7 @@ from common.features_extractor import FeaturesExtractor
 class SanaModel(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
-        self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path)
-        #self.patch()
+        self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16)
         if params.pretrained_model_path != None:
             transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path) 
             self.pipe.transformer = transformer.to(torch.bfloat16)
@@ -63,7 +62,7 @@ class SanaModel(Model):
         vae = self.pipe.vae
         text_encoder = self.pipe.text_encoder
         
-        transformer = transformer.to(self.accelerator.device)
+        transformer.to(self.accelerator.device)
         vae.cpu()
         text_encoder.cpu()
     
