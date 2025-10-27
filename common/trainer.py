@@ -105,7 +105,7 @@ class Model:
                 params.text_encoder_max_batch_size,
                 self,
                 params.dataset_seed,
-                cache_size=4,
+                cache_size=4 * params.dreambooth_num_repeats,
                 r2_access_key=self.params.r2_access_key,
                 r2_bucket_name=self.params.r2_bucket_name,
                 r2_endpoint=self.params.r2_endpoint,
