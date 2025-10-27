@@ -160,6 +160,7 @@ class TrainingParameters:
             self.lora_use_rslora = 'lora_use_rslora' in yaml_root.keys()
             self.lora_use_dora = 'lora_use_dora' in yaml_root.keys()
             self.dreambooth_lambda = float(yaml_root['dreambooth_lambda']) if 'dreambooth_lambda' in yaml_root.keys() else None
+            self.dreambooth_num_regularisation_passes = int(yaml_root['dreambooth_num_regularisation_passes']) if 'dreambooth_num_regularisation_passes' in yaml_root.keys() else 1
         
         self.low_vram = 'low_vram' in yaml_root.keys()
         self.use_calculated_features = 'use_calculated_features' in yaml_root.keys()

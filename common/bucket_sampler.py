@@ -372,6 +372,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
                  r2_endpoint : str = None,
                  r2_bucket_name : str = None,
                  shards : list[str] = None,
+                 dreambooth_num_regularisation_passes = 1,
         ):
         super().__init__(
             shards,
@@ -395,6 +396,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
         self.dreambooth_class = dreambooth_class
         self.dreambooth_lambda = dreambooth_lambda
         self.dreambooth_num_repeats = dreambooth_num_repeats
+        self.dreambooth_num_regularisation_passes = dreambooth_num_regularisation_passes
         self.reg_shard = False
 
         # this is a hack to reuse the existing code!
@@ -414,25 +416,26 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
                             num_tars.value = num_tars.value + 1
                 else:
                     # we get the regularization images either from a local folder or a bucket on the cloud
-                    if self.r2_bucket_name == None:
-                        q.put((True, self.dreambooth_regularization_folder))
-                    else:
-                        current_shard_index = self.get_next_shard_index()
-                        dataset_url = get_secured_urls(self.r2_access_key,
-                                    self.r2_secret_key,
-                                    self.r2_endpoint,
-                                    self.r2_bucket_name,
-                                    [self.features_path + '/' + self.shards[current_shard_index]]
-                                    )[0]
-                        local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
-                        try:
-                            download_tar(dataset_url, local_shard_path)
-                        except:
+                    for r in range(self.dreambooth_num_regularisation_passes):
+                        if self.r2_bucket_name == None:
+                            q.put((True, self.dreambooth_regularization_folder))
+                        else:
                             current_shard_index = self.get_next_shard_index()
-                            continue
-                        q.put((True, local_shard_path))
-                with num_tars.get_lock():
-                    num_tars.value = num_tars.value + 1
+                            dataset_url = get_secured_urls(self.r2_access_key,
+                                        self.r2_secret_key,
+                                        self.r2_endpoint,
+                                        self.r2_bucket_name,
+                                        [self.features_path + '/' + self.shards[current_shard_index]]
+                                        )[0]
+                            local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
+                            try:
+                                download_tar(dataset_url, local_shard_path)
+                            except:
+                                current_shard_index = self.get_next_shard_index()
+                                continue
+                            q.put((True, local_shard_path))
+                        with num_tars.get_lock():
+                            num_tars.value = num_tars.value + 1
                 current_item = current_item + 1
         self.download_shard_proc = download_shard_worker
     
