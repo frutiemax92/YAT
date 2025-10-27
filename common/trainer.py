@@ -110,7 +110,8 @@ class Model:
                 r2_bucket_name=self.params.r2_bucket_name,
                 r2_endpoint=self.params.r2_endpoint,
                 r2_secret_key=self.params.r2_secret_key,
-                shards=shards
+                shards=shards,
+                dreambooth_num_regularisation_passes=params.dreambooth_num_regularisation_passes
             )
         elif params.compute_features == False:
             shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
