@@ -105,7 +105,7 @@ class Model:
                 params.text_encoder_max_batch_size,
                 self,
                 params.dataset_seed,
-                cache_size=4 * params.dreambooth_num_repeats,
+                cache_size=4 * params.dreambooth_num_repeats * params.dreambooth_num_regularisation_passes
                 r2_access_key=self.params.r2_access_key,
                 r2_bucket_name=self.params.r2_bucket_name,
                 r2_endpoint=self.params.r2_endpoint,
@@ -168,7 +168,7 @@ class Model:
                     config = FourierFTConfig(
                         target_modules=params.lora_target_modules, 
                         init_weights=True, 
-                        alpha=params.lora_alpha, 
+                        alpha=params.fourierft_alpha, 
                         scaling=1.0, 
                         ifft2_norm='ortho')
                 self.model = get_peft_model(self.model, config).to(dtype=dtype)
