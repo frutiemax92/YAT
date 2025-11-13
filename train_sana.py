@@ -17,10 +17,12 @@ from common.features_extractor import FeaturesExtractor
 class SanaModel(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
-        self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16)
+        
         if params.pretrained_model_path != None:
-            transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path) 
-            self.pipe.transformer = transformer.to(torch.bfloat16)
+            transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path)
+            self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path, transformer=transformer.to(torch.bfloat16), torch_dtype=torch.bfloat16) 
+        else:
+            self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16) 
         
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
         self.pipe.vae.train(False)
