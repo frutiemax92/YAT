@@ -19,8 +19,11 @@ class SanaModel(Model):
         super().__init__(params)
         
         if params.pretrained_model_path != None:
-            transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path)
-            self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path, transformer=transformer.to(torch.bfloat16), torch_dtype=torch.bfloat16) 
+            transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path, 
+                                                                 quantization_config=self.quantization_config, 
+                                                                 torch_dtype=torch.bfloat16,
+                                                                 device_map=f"cuda:{self.accelerator.process_index}")
+            self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path, transformer=transformer, torch_dtype=torch.bfloat16) 
         else:
             self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16) 
         
@@ -44,7 +47,6 @@ class SanaModel(Model):
 
         #self.patch()
 
-        self.pipe.transformer.to(torch.bfloat16)
         self.pipe.text_encoder.to(torch.bfloat16)
         self.pipe.vae.to(torch.bfloat16)
 
@@ -79,8 +81,7 @@ class SanaModel(Model):
 
     def extract_embeddings(self, captions):
         # move text_encoder to cuda if not already done
-        self.pipe.text_encoder = self.pipe.text_encoder.to(device=self.accelerator.device)
-        
+        self.pipe.text_encoder.to(device=self.accelerator.device)
         prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
         self.pipe.encode_prompt(captions,
                                 do_classifier_free_guidance=False,

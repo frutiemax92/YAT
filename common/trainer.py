@@ -1,7 +1,5 @@
 from common.training_parameters_reader import TrainingParameters
 from accelerate import Accelerator
-import webdataset as wds
-from torch.utils.data import DataLoader
 from common.bucket_sampler import BucketSampler, BucketSamplerExtractFeatures, BucketSamplerDreambooth
 from torch.utils.tensorboard import SummaryWriter
 import torch
@@ -10,7 +8,7 @@ from peft import LoraConfig, get_peft_model, PeftModel
 from peft import LoHaConfig, LoKrConfig, FourierFTConfig
 import os
 from diffusers.training_utils import EMAModel
-from transformers import AutoImageProcessor, AutoModel
+from diffusers import BitsAndBytesConfig
 import random
 from torch.optim.lr_scheduler import LambdaLR
 import os
@@ -53,6 +51,11 @@ class Model:
             self.shard_index_end = self.params.num_shards
         
         self.global_step = 0
+
+        # check if we use a quantization technique (for lora training)
+        self.quantization_config = None
+        if self.params.lora_base_model_8bit:
+            self.quantization_config = BitsAndBytesConfig(load_in_8bit=True)
 
     def extract_latents(self, images):
         raise NotImplemented

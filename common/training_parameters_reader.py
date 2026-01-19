@@ -150,6 +150,9 @@ class TrainingParameters:
             self.lora_rank = int(yaml_root['lora_rank'])
             self.lora_alpha = int(yaml_root['lora_alpha'])
 
+            # load the base model in 8bit
+            self.lora_base_model_8bit = True if 'lora_base_model_8bit' in yaml_root.keys() else False
+
             if 'lora_dropout' in yaml_root.keys():
                 self.lora_dropout = float(yaml_root['lora_dropout'])
             else:
