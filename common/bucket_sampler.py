@@ -86,9 +86,11 @@ class BucketSampler:
                 local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
                 try:
                     download_tar(dataset_url, local_shard_path)
-                except:
+                except Exception as e:
+                    print(e)
                     current_shard_index = self.get_next_shard_index()
                     continue
+                
                 q.put(local_shard_path)
                 with num_tars.get_lock():
                     num_tars.value = num_tars.value + 1
