@@ -25,6 +25,7 @@ class Model:
     def __init__(self, params : TrainingParameters):
         os.environ['NCCL_P2P_DISABLE'] = '1'
         os.environ['NCCL_IB_DISABLE'] = '1'
+        os.environ["NCCL_TIMEOUT"] = "100000000"
         self.accelerator = Accelerator(gradient_accumulation_steps=params.gradient_accumulation_steps)
         self.params = params
 
