@@ -5,6 +5,7 @@ from diffusers import SanaTransformer2DModel, FlowMatchEulerDiscreteScheduler, D
 from diffusers.training_utils import compute_density_for_timestep_sampling
 from diffusers import SanaPipeline, SanaPAGPipeline, AutoencoderDC
 from utils.patched_sana_transformer import PatchedSanaTransformer2DModel, patch_sana_attention_layers
+from utils.sana_patches.add_skip_connections import add_skip_connections
 from utils.patch_sana_attention_layers import unfreeze_sana_blocks
 import torch
 import tqdm
@@ -117,12 +118,11 @@ class SanaModel(Model):
         latents = []
         embeds = []
         for prompt in tqdm.tqdm(params.validation_prompts, desc='Generating validation embeddings'):
-            if params.low_vram:
-                text_encoder = text_encoder.to(device=self.accelerator.device)
-                self.pipe.text_encoder = text_encoder
-                prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
-                    self.pipe.encode_prompt(prompt)
-                embeds.append((prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask))
+            text_encoder = text_encoder.to(device=self.accelerator.device)
+            self.pipe.text_encoder = text_encoder
+            prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
+                self.pipe.encode_prompt(prompt)
+            embeds.append((prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask))
         
         text_encoder = text_encoder.cpu()
         self.pipe.text_encoder = None
