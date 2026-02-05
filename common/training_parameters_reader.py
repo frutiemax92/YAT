@@ -141,7 +141,10 @@ class TrainingParameters:
         self.huggingface_dataset_repo = None
         if 'huggingface_dataset_repo' in yaml_root.keys():
             self.huggingface_dataset_repo = yaml_root['huggingface_dataset_repo']
-            
+        
+        # option with the shards download locally (the most stable)
+        self.local_shard_paths = yaml_root['local_shard_paths'] if 'local_shard_paths' in yaml_root.keys() else None
+        
         # lora training
         if 'lora_rank' in yaml_root.keys():
             if 'lora_pretrained' in yaml_root.keys():

@@ -47,7 +47,8 @@ class BucketSampler:
                  cache_size : int,
                  seed : int,
                  use_repa : bool = False,
-                 local_temp_dir : str = 'temp'  
+                 local_temp_dir : str = 'temp',
+                 local_paths: list[str] = None  
                  ):
         self.process_index = accelerator.process_index
         self.num_processes = accelerator.num_processes
@@ -67,6 +68,19 @@ class BucketSampler:
         self.local_temp_dir = local_temp_dir
         self.features_path = features_path
         self.cache_size = cache_size
+        self.local_paths = local_paths
+
+        def local_file_getter(self, q : mp.Queue, num_tars = mp.Value):
+            while True:
+                with num_tars.get_lock():
+                    n = num_tars.value
+                if n >= self.cache_size:
+                    time.sleep(1.0)
+                    continue
+            local_path = random.choice(self.local_paths)
+            q.put(local_shard_path)
+            with num_tars.get_lock():
+                num_tars.value = num_tars.value + 1
 
         def download_shard_worker(self, q : mp.Queue, num_tars = mp.Value):
             current_item = 0
@@ -95,7 +109,12 @@ class BucketSampler:
                 with num_tars.get_lock():
                     num_tars.value = num_tars.value + 1
                 current_item = current_item + 1
-        self.download_shard_proc = download_shard_worker
+        
+        if self.local_paths == None:
+            self.download_shard_proc = download_shard_worker
+        else:
+            self.download_shard_proc = local_file_getter
+        
         os.makedirs(self.local_temp_dir, exist_ok=True)
 
         if use_repa:

@@ -128,7 +128,8 @@ class Model:
                             params.r2_endpoint,
                             params.r2_bucket_name,
                             params.dataset_seed,
-                            cache_size=4)
+                            cache_size=4,
+                            local_paths=self.params.local_shard_paths)
         else:
             shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
             self.sampler = BucketSamplerExtractFeatures(shards,
