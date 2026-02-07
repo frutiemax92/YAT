@@ -98,6 +98,7 @@ class KleinModel(Model):
                 width=800,
                 guidance_scale=7.0,
                 num_inference_steps=20,
+                generator=torch.Generator().manual_seed(0)
             ).images[0]
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image), self.global_step)
             idx = idx + 1

@@ -104,8 +104,8 @@ class BucketSampler:
                 else:
                     # this will wait here
                     r = to_remove.get()
-                    self.cleanup_shard(r.value)
-                    local_shard_paths.remove(r.value)
+                    self.cleanup_shard(r)
+                    local_shard_paths.remove(r)
                 
                 to_train.put(local_shard_paths[-1])
                 current_item = current_item + 1
