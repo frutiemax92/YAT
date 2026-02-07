@@ -119,6 +119,7 @@ class Model:
             )
         elif params.compute_features == False:
             shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
+            print(self.params.local_shard_paths)
             self.sampler = BucketSampler(shards,
                             params.r2_dataset_folder,
                             self.accelerator,
@@ -132,6 +133,7 @@ class Model:
                             local_paths=self.params.local_shard_paths)
         else:
             shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
+            print(self.params.local_shard_paths)
             self.sampler = BucketSamplerExtractFeatures(shards,
                             params.r2_dataset_folder,
                             self.accelerator,
@@ -145,7 +147,8 @@ class Model:
                             self,
                             params.dataset_seed,
                             cache_size=4,
-                            use_repa=params.use_repa)
+                            use_repa=params.use_repa,
+                            local_paths=self.params.local_shard_paths)
         #self.sampler = self.accelerator.prepare(self.sampler)
         
         # check for lora training

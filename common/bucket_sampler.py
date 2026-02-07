@@ -70,26 +70,21 @@ class BucketSampler:
         self.cache_size = cache_size
         self.local_paths = local_paths
 
-        def local_file_getter(self, q : mp.Queue, num_tars = mp.Value):
-            while True:
-                with num_tars.get_lock():
-                    n = num_tars.value
-                if n >= self.cache_size:
-                    time.sleep(1.0)
-                    continue
+        def local_file_getter(self, process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
+            print('using local file getter')
+            
             local_path = random.choice(self.local_paths)
-            q.put(local_shard_path)
-            with num_tars.get_lock():
-                num_tars.value = num_tars.value + 1
+            while os.path.exists(local_path) == False:
+                local_path = random.choice(self.local_paths)
+            to_train.put(local_path)
 
-        def download_shard_worker(self, q : mp.Queue, num_tars = mp.Value):
+            # the simplest solution is to wait for to_remove
+            r = to_remove.get()
+
+        def download_shard_worker(self, process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
             current_item = 0
+            local_shard_paths = []
             while True:
-                with num_tars.get_lock():
-                    n = num_tars.value
-                if n >= self.cache_size:
-                    time.sleep(1.0)
-                    continue
                 current_shard_index = self.get_next_shard_index()
                 dataset_url = get_secured_urls(self.r2_access_key,
                                     self.r2_secret_key,
@@ -97,17 +92,22 @@ class BucketSampler:
                                     self.r2_bucket_name,
                                     [self.features_path + '/' + self.shards[current_shard_index]]
                                     )[0]
-                local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
-                try:
-                    download_tar(dataset_url, local_shard_path)
-                except Exception as e:
-                    print(e)
-                    current_shard_index = self.get_next_shard_index()
-                    continue
+                local_shard_path = self.local_temp_dir + f'/shard_{process_index}_{current_item}.tar'
+                if len(local_shard_paths) < 10:
+                    try:
+                        download_tar(dataset_url, local_shard_path)
+                    except Exception as error:
+                        print(error)
+                        current_shard_index = self.get_next_shard_index()
+                        continue
+                    local_shard_paths.append(local_shard_path)
+                else:
+                    # this will wait here
+                    r = to_remove.get()
+                    self.cleanup_shard(r.value)
+                    local_shard_paths.remove(r.value)
                 
-                q.put(local_shard_path)
-                with num_tars.get_lock():
-                    num_tars.value = num_tars.value + 1
+                to_train.put(local_shard_paths[-1])
                 current_item = current_item + 1
         
         if self.local_paths == None:
@@ -178,20 +178,19 @@ class BucketSampler:
                 res = r
         return res
     
-    def get_local_shard_path(self, q : mp.Queue):
-        return q.get()
-    
     def __iter__(self):
         sync_counter = 0
         random.seed(self.process_index + self.seed)
         
         # start the download process
-        q = mp.Queue()
-        num_tars = mp.Value('i', 0)
-        p = mp.Process(target=self.download_shard_proc, args=(self, q, num_tars))
+        to_train = mp.Queue()
+        to_remove = mp.Queue()
+        p = mp.Process(target=self.download_shard_proc, args=(self, self.process_index, to_train, to_remove))
         p.start()
         while True:
-            local_shard_path = self.get_local_shard_path(q)
+            # this will wait for a valid shard path
+            local_shard_path = to_train.get()
+
             dataset = (
                 wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None)
                 .shuffle(1000)
@@ -260,10 +259,7 @@ class BucketSampler:
                 #except Exception as e:
                     #print(f"Process {self.process_index} gather error: {e}")
                     #continue
-            
-            self.cleanup_shard(local_shard_path)
-            with num_tars.get_lock():
-                num_tars.value = num_tars.value - 1
+            to_remove.put(local_shard_path)
 
 class BucketSamplerExtractFeatures(BucketSampler):
     def __init__(self,
@@ -281,7 +277,8 @@ class BucketSamplerExtractFeatures(BucketSampler):
                  seed,
                  cache_size : int,
                  use_repa : bool = False,
-                 local_temp_dir : str = 'temp'  
+                 local_temp_dir : str = 'temp',
+                 local_paths=None,
                  ):
         super().__init__(shards,
                          features_path,
@@ -293,7 +290,8 @@ class BucketSamplerExtractFeatures(BucketSampler):
                          r2_bucket_name,
                          local_temp_dir,
                          seed,
-                         use_repa)
+                         use_repa,
+                        local_paths=local_paths)
         self.vae_max_batch_size = vae_max_batch_size
         self.text_encoder_max_batch_size = text_encoder_max_batch_size
         self.model = model
