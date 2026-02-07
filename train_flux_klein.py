@@ -31,7 +31,7 @@ class KleinModel(Model):
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
         self.pipe.vae.train(False)
         self.pipe.text_encoder.train(False)
-        self.pipe.enable_model_cpu_offload()
+        #self.pipe.enable_model_cpu_offload()
         self.aspect_ratios = ASPECT_RATIO_1024_BIN
 
         self.pipe.text_encoder.to(torch.bfloat16)
@@ -45,7 +45,7 @@ class KleinModel(Model):
         #self.pipe = self.pipe.to(self.accelerator.device)
         self.pipe.transformer = self.model
         transformer = self.pipe.transformer
-        #transformer.to(self.accelerator.device)
+        transformer.to(self.accelerator.device)
     
     def format_embeddings(self, embeds):
         pass
@@ -70,10 +70,32 @@ class KleinModel(Model):
 
         negative_prompt = ""
         idx = 0
-        for prompt in tqdm.tqdm(params.validation_prompts, desc='Generating validation images'):
+
+        self.pipe.transformer.cpu()
+        self.pipe.vae.cpu()
+        torch.cuda.empty_cache()
+
+        embeds = []
+        neg_embeds = None
+        with torch.no_grad():
+            for prompt in tqdm.tqdm(params.validation_prompts, desc='Generating validation prompts'):
+                prompt_embeds, text_ids = self.pipe.encode_prompt(prompt)
+                embeds.append(prompt_embeds)
+
+            neg_embeds, text_ids = self.pipe.encode_prompt(negative_prompt)
+
+        #embeds = torch.stack(embeds)
+
+        self.pipe.text_encoder.cpu()
+        self.pipe.transformer.to(self.accelerator.device)
+        self.pipe.vae.to(self.accelerator.device)
+        torch.cuda.empty_cache()
+
+        for embed in tqdm.tqdm(embeds, desc='Generating validation images'):
+            prompt_embeds = embed
             image = self.pipe(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
+                prompt_embeds=prompt_embeds,
+                negative_prompt_embeds=neg_embeds,
                 height=1200,
                 width=800,
                 guidance_scale=7.0,
@@ -81,6 +103,8 @@ class KleinModel(Model):
             ).images[0]
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image), self.global_step)
             idx = idx + 1
+        
+        self.pipe.text_encoder.to(self.accelerator.device)
     
     def optimize(self, ratio, latents, embeddings):
         params = self.params
