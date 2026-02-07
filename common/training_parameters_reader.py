@@ -25,6 +25,7 @@ class TrainingParameters:
         self.use_preservation = None
         self.preservation_ratio = None
         self.url_probs = None
+        self.lora_base_model_8bit = None
 
         # lora
         self.lora_target_modules = None
