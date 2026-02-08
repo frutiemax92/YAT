@@ -307,8 +307,6 @@ class Model:
                     
                                 if self.ema_model != None:
                                     self.ema_model.restore(self.model.parameters())
-                        self.accelerator.wait_for_everyone()
-                    
                     progress_bar.update(1)
                     self.global_step = self.global_step + 1
             # if hasattr(self, 'repa_model'):
