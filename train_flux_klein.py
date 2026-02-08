@@ -42,6 +42,11 @@ class KleinModel(Model):
         self.pipe.transformer = self.model
         transformer = self.pipe.transformer
         transformer.to(self.accelerator.device)
+
+        self.latents_bn_mean = self.pipe.vae.bn.running_mean.view(1, -1, 1, 1).to(self.accelerator.device)
+        self.latents_bn_std = torch.sqrt(self.pipe.vae.bn.running_var.view(1, -1, 1, 1) + self.pipe.vae.config.batch_norm_eps).to(
+            self.accelerator.device
+            )
     
     def format_embeddings(self, embeds):
         pass
@@ -49,7 +54,9 @@ class KleinModel(Model):
     def extract_latents(self, images):
         # put the vae on the gpu if it's not already
         self.pipe.vae.to(device=self.accelerator.device)
-        output = self.pipe.vae.encode(images.to(dtype=self.pipe.vae.dtype)).latent_dist.sample()
+        output = self.pipe.vae.encode(images.to(dtype=self.pipe.vae.dtype)).latent_dist.mode()
+        output = Flux2KleinPipeline._patchify_latents(output)
+        output = (output - self.latents_bn_mean) / self.latents_bn_std
         return output.to(torch.bfloat16)
 
     def extract_embeddings(self, captions):
@@ -118,7 +125,6 @@ class KleinModel(Model):
         
         prompt_embeds = torch.stack(prompt_embeds).to(dtype=torch.bfloat16, device=self.accelerator.device)
         latents = latents.to(device=self.accelerator.device, dtype=torch.bfloat16)
-        latents = self.pipe._patchify_latents(latents)
         text_ids = torch.stack(text_ids).to(dtype=torch.bfloat16, device=self.accelerator.device)
 
         loss_fn = torch.nn.MSELoss()
