@@ -314,6 +314,5 @@ class Model:
                                     self.ema_model.restore(self.model.parameters())
                     progress_bar.update(1)
                     self.global_step = self.global_step + 1
-                    self.accelerator.wait_for_everyone()
             # if hasattr(self, 'repa_model'):
             #     self.repa_model.cpu()
