@@ -9,6 +9,7 @@ from peft import LoHaConfig, LoKrConfig, FourierFTConfig
 import os
 from diffusers.training_utils import EMAModel
 from diffusers import BitsAndBytesConfig
+import bitsandbytes
 import random
 from torch.optim.lr_scheduler import LambdaLR
 import os
@@ -185,9 +186,13 @@ class Model:
             self.model.print_trainable_parameters()
 
         params_to_optimizer = self.model.parameters()
-        self.optimizer = torch.optim.AdamW(params_to_optimizer,
-                                            lr=params.learning_rate,
-                                            weight_decay=params.weight_decay)
+
+        if self.params.use_adamw_8bit == False:
+            self.optimizer = torch.optim.AdamW(params_to_optimizer,
+                                                lr=params.learning_rate,
+                                                weight_decay=params.weight_decay)
+        else:
+            self.optimizer = bitsandbytes.optim.AdamW8bit(params=params_to_optimizer, lr=params.learning_rate, weight_decay=params.weight_decay)
         self.optimizer = self.accelerator.prepare(self.optimizer)
         #self.model = self.accelerator.prepare(self.model)
 

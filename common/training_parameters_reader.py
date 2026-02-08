@@ -26,6 +26,7 @@ class TrainingParameters:
         self.preservation_ratio = None
         self.url_probs = None
         self.lora_base_model_8bit = None
+        self.use_adamw_8bit = False
 
         # lora
         self.lora_target_modules = None
@@ -145,6 +146,7 @@ class TrainingParameters:
         
         # option with the shards download locally (the most stable)
         self.local_shard_paths = yaml_root['local_shard_paths'] if 'local_shard_paths' in yaml_root.keys() else None
+        self.use_adamw_8bit  = 'use_adamw_8bit ' in yaml_root.keys()
         
         # lora training
         if 'lora_rank' in yaml_root.keys():
