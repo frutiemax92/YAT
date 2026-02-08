@@ -260,7 +260,6 @@ class BucketSampler:
                     #print(f"Process {self.process_index} gather error: {e}")
                     #continue
             to_remove.put(local_shard_path)
-            self.accelerator.wait_for_everyone()
 
 class BucketSamplerExtractFeatures(BucketSampler):
     def __init__(self,
