@@ -92,8 +92,8 @@ class BucketSampler:
                                     self.r2_bucket_name,
                                     [self.features_path + '/' + self.shards[current_shard_index]]
                                     )[0]
-                local_shard_path = self.local_temp_dir + f'/shard_{process_index}_{current_item}.tar'
                 if len(local_shard_paths) < 10:
+                    local_shard_path = self.local_temp_dir + f'/shard_{process_index}_{current_item}.tar'
                     try:
                         download_tar(dataset_url, local_shard_path)
                     except Exception as error:
@@ -109,8 +109,9 @@ class BucketSampler:
                     # cover the case for duplicates
                     if r in local_shard_paths == False:
                         self.cleanup_shard(r)
+                    local_shard_path = local_shard_paths[-1]
                 
-                to_train.put(local_shard_paths[-1])
+                to_train.put(local_shard_path)
                 current_item = current_item + 1
         
         if self.local_paths == None:
