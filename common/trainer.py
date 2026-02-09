@@ -192,7 +192,7 @@ class Model:
                                                 lr=params.learning_rate,
                                                 weight_decay=params.weight_decay)
         else:
-            self.optimizer = bitsandbytes.optim.AdamW8bit(params=params_to_optimizer, lr=params.learning_rate, weight_decay=params.weight_decay)
+            self.optimizer = bitsandbytes.optim.Lion8bit(params=params_to_optimizer, lr=params.learning_rate, weight_decay=params.weight_decay)
         self.optimizer = self.accelerator.prepare(self.optimizer)
         #self.model = self.accelerator.prepare(self.model)
 

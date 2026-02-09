@@ -104,12 +104,15 @@ class BucketSampler:
                 else:
                     # this will wait here
                     r = to_remove.get()
-                    local_shard_paths.remove(r)
 
-                    # cover the case for duplicates
-                    if r in local_shard_paths == False:
-                        self.cleanup_shard(r)
-                    local_shard_path = local_shard_paths[-1]
+                    # strangely, this can happen?!
+                    if r in local_shard_paths:
+                        local_shard_paths.remove(r)
+
+                        # cover the case for duplicates
+                        if r in local_shard_paths == False:
+                            self.cleanup_shard(r)
+                        local_shard_path = local_shard_paths[-1]
                 
                 to_train.put(local_shard_path)
                 current_item = current_item + 1
