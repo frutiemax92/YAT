@@ -260,7 +260,6 @@ class BucketSampler:
                         # Clean up after yielding
                         self.buckets[closest_ratio].clear()
                         self.valid_buckets.remove(closest_ratio)
-                        self.accelerator.wait_for_everyone()
                         break
                             
                 #except Exception as e:
