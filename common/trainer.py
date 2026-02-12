@@ -18,6 +18,7 @@ from utils.patched_sana_transformer import PatchedSanaTransformer2DModel
 import math
 from common.repa import RepaModel, RepaConfig
 from accelerate.utils import InitProcessGroupKwargs
+from datetime import timedelta
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
@@ -28,7 +29,7 @@ class Model:
         os.environ["NCCL_TIMEOUT"] = "100000000"
         self.accelerator = Accelerator(
             gradient_accumulation_steps=params.gradient_accumulation_steps, 
-            kwargs_handlers=[InitProcessGroupKwargs(timeout=3600)])
+            kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(seconds=3600))])
         self.params = params
 
         self.process_index = self.accelerator.process_index
