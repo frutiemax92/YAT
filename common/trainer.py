@@ -17,6 +17,7 @@ from diffusers import SanaTransformer2DModel
 from utils.patched_sana_transformer import PatchedSanaTransformer2DModel
 import math
 from common.repa import RepaModel, RepaConfig
+from accelerate.utils import InitProcessGroupKwargs
 
 #from Sana.diffusion.utils.optimizer import CAME8BitWrapper
 
@@ -25,7 +26,9 @@ class Model:
         os.environ['NCCL_P2P_DISABLE'] = '1'
         os.environ['NCCL_IB_DISABLE'] = '1'
         os.environ["NCCL_TIMEOUT"] = "100000000"
-        self.accelerator = Accelerator(gradient_accumulation_steps=params.gradient_accumulation_steps)
+        self.accelerator = Accelerator(
+            gradient_accumulation_steps=params.gradient_accumulation_steps, 
+            kwargs_handlers=[InitProcessGroupKwargs(timeout=3600)])
         self.params = params
 
         self.process_index = self.accelerator.process_index
@@ -314,5 +317,6 @@ class Model:
                                     self.ema_model.restore(self.model.parameters())
                     progress_bar.update(1)
                     self.global_step = self.global_step + 1
+                    self.accelerator.wait_for_everyone()
             # if hasattr(self, 'repa_model'):
             #     self.repa_model.cpu()

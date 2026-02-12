@@ -208,10 +208,6 @@ class BucketSampler:
             for elem in dataset:
                 self.process_element(elem)
                 
-                sync_counter += 1
-                if sync_counter % (self.batch_size * 2) != 0:
-                    continue
-                
                 # Check for valid buckets before synchronization
                 for r in list(self.buckets.keys()):
                     if len(self.buckets[r]) >= self.batch_size:
@@ -232,7 +228,6 @@ class BucketSampler:
                 
                 #try:
                 # Gather valid buckets across processes
-                self.accelerator.wait_for_everyone()
                 dist_valid_buckets = self.accelerator.gather(bucket_tensor)
                 ratio_counts = self.get_unique_ratios(dist_valid_buckets)
                 
