@@ -109,10 +109,7 @@ class BucketSampler:
                     # strangely, this can happen?!
                     if r in local_shard_paths:
                         local_shard_paths.remove(r)
-
-                        # cover the case for duplicates
-                        if r in local_shard_paths == False:
-                            self.cleanup_shard(r)
+                        self.cleanup_shard(r)
 
                 local_shard_path = random.choice(local_shard_paths)
                 to_train.put(local_shard_path)
