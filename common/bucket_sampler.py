@@ -93,25 +93,22 @@ class BucketSampler:
                                     self.r2_bucket_name,
                                     [self.features_path + '/' + self.shards[current_shard_index]]
                                     )[0]
-                if num_shards < 10:
-                    local_shard_path = self.local_temp_dir + f'/shard_{process_index}_{current_item}.tar'
-                    try:
-                        download_tar(dataset_url, local_shard_path)
-                    except Exception as error:
-                        print(error)
-                        current_shard_index = self.get_next_shard_index()
-                        continue
-                    to_train.put(local_shard_path)
-                    current_item = current_item + 1
-                    num_shards = num_shards + 1
+                local_shard_path = self.local_temp_dir + f'/shard_{process_index}_{current_item}.tar'
+                try:
+                    download_tar(dataset_url, local_shard_path)
+                except Exception as error:
+                    print(error)
+                    current_shard_index = self.get_next_shard_index()
                     continue
-                else:
-                    # this will wait here
-                    r = to_remove.get()
+                to_train.put(local_shard_path)
+                current_item = current_item + 1
+
+                try:
+                    r = to_remove.get(timeout=10)
                     print(f'removing shard {r}')
                     self.cleanup_shard(r)
-                    num_shards = num_shards - 1
-                    continue
+                except:
+                    pass
         
         if self.local_paths == None:
             self.download_shard_proc = download_shard_worker
