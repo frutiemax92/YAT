@@ -108,11 +108,9 @@ class BucketSampler:
                 else:
                     # this will wait here
                     r = to_remove.get()
-
-                    if r in local_shard_paths:
-                        print(f'removing shard {r}')
-                        self.cleanup_shard(r)
-                        num_shards = num_shards - 1
+                    print(f'removing shard {r}')
+                    self.cleanup_shard(r)
+                    num_shards = num_shards - 1
                     continue
         
         if self.local_paths == None:
