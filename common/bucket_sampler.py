@@ -84,7 +84,7 @@ class BucketSampler:
 
         def download_shard_worker(self, process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
             current_item = 0
-            local_shard_paths = []
+            num_shards = 0
             while True:
                 current_shard_index = self.get_next_shard_index()
                 dataset_url = get_secured_urls(self.r2_access_key,
@@ -93,7 +93,7 @@ class BucketSampler:
                                     self.r2_bucket_name,
                                     [self.features_path + '/' + self.shards[current_shard_index]]
                                     )[0]
-                if len(local_shard_paths) < 10:
+                if num_shards < 10:
                     local_shard_path = self.local_temp_dir + f'/shard_{process_index}_{current_item}.tar'
                     try:
                         download_tar(dataset_url, local_shard_path)
@@ -101,19 +101,19 @@ class BucketSampler:
                         print(error)
                         current_shard_index = self.get_next_shard_index()
                         continue
-                    local_shard_paths.append(local_shard_path)
+                    to_train.put(local_shard_path)
+                    current_item = current_item + 1
+                    num_shards = num_shards + 1
+                    continue
                 else:
                     # this will wait here
                     r = to_remove.get()
 
-                    # strangely, this can happen?!
                     if r in local_shard_paths:
-                        local_shard_paths.remove(r)
+                        print(f'removing shard {r}')
                         self.cleanup_shard(r)
-
-                local_shard_path = random.choice(local_shard_paths)
-                to_train.put(local_shard_path)
-                current_item = current_item + 1
+                        num_shards = num_shards - 1
+                    continue
         
         if self.local_paths == None:
             self.download_shard_proc = download_shard_worker
