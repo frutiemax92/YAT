@@ -86,22 +86,23 @@ class BucketSampler:
             current_item = 0
             num_shards = 0
             while True:
-                current_shard_index = self.get_next_shard_index()
-                dataset_url = get_secured_urls(self.r2_access_key,
-                                    self.r2_secret_key,
-                                    self.r2_endpoint,
-                                    self.r2_bucket_name,
-                                    [self.features_path + '/' + self.shards[current_shard_index]]
-                                    )[0]
-                local_shard_path = self.local_temp_dir + f'/shard_{process_index}_{current_item}.tar'
-                try:
-                    download_tar(dataset_url, local_shard_path)
-                except Exception as error:
-                    print(error)
+                if to_train.qsize() < 4:
                     current_shard_index = self.get_next_shard_index()
-                    continue
-                to_train.put(local_shard_path)
-                current_item = current_item + 1
+                    dataset_url = get_secured_urls(self.r2_access_key,
+                                        self.r2_secret_key,
+                                        self.r2_endpoint,
+                                        self.r2_bucket_name,
+                                        [self.features_path + '/' + self.shards[current_shard_index]]
+                                        )[0]
+                    local_shard_path = self.local_temp_dir + f'/shard_{process_index}_{current_item}.tar'
+                    try:
+                        download_tar(dataset_url, local_shard_path)
+                    except Exception as error:
+                        print(error)
+                        current_shard_index = self.get_next_shard_index()
+                        continue
+                    to_train.put(local_shard_path)
+                    current_item = current_item + 1
 
                 try:
                     r = to_remove.get(timeout=10)
