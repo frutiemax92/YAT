@@ -41,7 +41,8 @@ def download_tar(url, local_path, max_total_time=240):
         r.raise_for_status()
         with open(local_path, 'wb') as f:
             for chunk in tqdm(r.iter_content(chunk_size=8192), desc='downloading chunks'):
-                f.write(chunk)
+                if chunk:
+                    f.write(chunk)
 
                 if time.time() - start_time > max_total_time:
                     raise DownloadTimeoutError(

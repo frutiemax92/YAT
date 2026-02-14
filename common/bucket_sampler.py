@@ -198,7 +198,6 @@ class BucketSampler:
                 .decode(self.pt_decoder)
             )
             
-            self.accelerator.wait_for_everyone()
             for elem in dataset:
                 self.process_element(elem)
                 
