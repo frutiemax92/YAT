@@ -214,10 +214,10 @@ class Model:
             self.lr_scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
 
         # apply EMA
+        self.ema_model = None
         if self.params.use_ema:
             self.ema_model = EMAModel(self.model.parameters(), decay=0.999)
             self.ema_model.to(self.accelerator.device)
-        self.ema_model = None
 
         # extract empty embedding
         with torch.no_grad():
@@ -276,14 +276,14 @@ class Model:
 
                     if self.accelerator.sync_gradients:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    self.optimizer.step()
+                        self.optimizer.step()
 
-                    if self.ema_model != None:
-                        self.ema_model.step(self.model.parameters())
+                        if self.ema_model != None:
+                            self.ema_model.step(self.model.parameters())
 
-                    if self.lr_scheduler != None:
-                        self.lr_scheduler.step()
-                    self.optimizer.zero_grad()
+                        if self.lr_scheduler != None:
+                            self.lr_scheduler.step()
+                        self.optimizer.zero_grad()
                 
                 if self.accelerator.sync_gradients:
                     mean_loss = torch.mean(self.accelerator.gather(avg_loss))
@@ -303,7 +303,7 @@ class Model:
                             # ✅ Run reduction on ALL processes to sync EMA parameters
                             if self.ema_model != None:
                                 for param in self.ema_model.shadow_params:
-                                    self.accelerator.reduce(param.data, reduction="mean")
+                                    param.data = self.accelerator.reduce(param.data, reduction="mean")
                     
                             # ✅ Ensure store() is called before restore()
                             if self.accelerator.is_main_process:
