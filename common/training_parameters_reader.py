@@ -45,6 +45,7 @@ class TrainingParameters:
 
         # low vram
         self.low_vram = None
+        self.pretrained_pipe_single_file = None
     
     def read_yaml(self, file):
         with open(file) as f:

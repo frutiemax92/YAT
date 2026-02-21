@@ -206,11 +206,7 @@ class Model:
             def lr_lambda(current_step):
                 if current_step < warmup_steps:
                     return float(current_step) / float(max(1, warmup_steps))
-                amp = (1.0 - 0.1) / 2.0
-                mid = 1.0 - amp
-                return mid + amp * math.cos(
-                    2 * math.pi * current_step / self.params.num_steps_per_validation
-                )
+                return 1.0
             self.lr_scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
 
         # apply EMA
