@@ -153,6 +153,7 @@ class BucketSampler:
         # Clean up at end of shard
         if os.path.exists(local_shard_path):
             os.remove(local_shard_path)
+            print(f'removing shard {local_shard_path}')
     
     def get_invalid_bucket(self):
         return [-1.0]
@@ -179,6 +180,12 @@ class BucketSampler:
                 res = r
         return res
     
+    def get_local_shard_path(self, to_train : mp.Queue):
+        return to_train.get()
+    
+    def remove_shard(self, to_remove : mp.Queue, local_shard_path):
+        to_remove.put(local_shard_path)
+    
     def __iter__(self):
         sync_counter = 0
         random.seed(self.process_index + self.seed)
@@ -190,7 +197,7 @@ class BucketSampler:
         p.start()
         while True:
             # this will wait for a valid shard path
-            local_shard_path = to_train.get()
+            local_shard_path = self.get_local_shard_path(to_train)
 
             dataset = (
                 wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None)
@@ -253,7 +260,7 @@ class BucketSampler:
                 #except Exception as e:
                     #print(f"Process {self.process_index} gather error: {e}")
                     #continue
-            to_remove.put(local_shard_path)
+            self.remove_shard(to_remove, local_shard_path)
 
 class BucketSamplerExtractFeatures(BucketSampler):
     def __init__(self,
@@ -413,55 +420,52 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
         self.reg_shard = False
 
         # this is a hack to reuse the existing code!
-        def download_shard_worker(self, q : mp.Queue, num_tars = mp.Value):
+        def download_shard_worker(self, process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
             current_item = 0
             while True:
-                with num_tars.get_lock():
-                    n = num_tars.value
-                if n >= self.cache_size:
-                    time.sleep(1.0)
-                    continue
-
-                if current_item % 2 == 0:
-                    for r in range(self.dreambooth_num_repeats):
-                        q.put((False, self.dreambooth_dataset_folder))
-                        with num_tars.get_lock():
-                            num_tars.value = num_tars.value + 1
-                else:
-                    # we get the regularization images either from a local folder or a bucket on the cloud
-                    for r in range(self.dreambooth_num_regularisation_passes):
-                        if self.r2_bucket_name == None:
-                            q.put((True, self.dreambooth_regularization_folder))
-                        else:
-                            current_shard_index = self.get_next_shard_index()
-                            dataset_url = get_secured_urls(self.r2_access_key,
-                                        self.r2_secret_key,
-                                        self.r2_endpoint,
-                                        self.r2_bucket_name,
-                                        [self.features_path + '/' + self.shards[current_shard_index]]
-                                        )[0]
-                            local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
-                            try:
-                                download_tar(dataset_url, local_shard_path)
-                            except:
+                if to_train.qsize() < 4:
+                    if current_item % 2 == 0:
+                        for r in range(self.dreambooth_num_repeats):
+                            to_train.put((False, self.dreambooth_dataset_folder))
+                    else:
+                        # we get the regularization images either from a local folder or a bucket on the cloud
+                        for r in range(self.dreambooth_num_regularisation_passes):
+                            if self.r2_bucket_name == None:
+                                to_train.put((True, self.dreambooth_regularization_folder))
+                            else:
                                 current_shard_index = self.get_next_shard_index()
-                                continue
-                            q.put((True, local_shard_path))
-                        with num_tars.get_lock():
-                            num_tars.value = num_tars.value + 1
-                current_item = current_item + 1
+                                dataset_url = get_secured_urls(self.r2_access_key,
+                                            self.r2_secret_key,
+                                            self.r2_endpoint,
+                                            self.r2_bucket_name,
+                                            [self.features_path + '/' + self.shards[current_shard_index]]
+                                            )[0]
+                                local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
+                                try:
+                                    download_tar(dataset_url, local_shard_path)
+                                except:
+                                    current_shard_index = self.get_next_shard_index()
+                                    continue
+                                to_train.put((True, local_shard_path))
+                    current_item = current_item + 1
+                try:
+                    reg_shard, local_shard_path = to_remove.get(timeout=10)
+                    if reg_shard:
+                        self.cleanup_shard(local_shard_path)
+                except:
+                    pass
         self.download_shard_proc = download_shard_worker
-    
-    def cleanup_shard(self, local_shard_path):
-        pass
-
-    def get_local_shard_path(self, q : mp.Queue):
-        is_reg, path = q.get()
-        self.reg_shard = is_reg
-        return path
 
     def get_invalid_bucket(self):
         return [(-1.0, -1.0)]
+    
+    def get_local_shard_path(self, to_train : mp.Queue):
+        is_reg, local_shard_path = to_train.get()
+        self.reg_shard = is_reg
+        return local_shard_path
+    
+    def remove_shard(self, to_remove : mp.Queue, local_shard_path):
+        to_remove.put((self.reg_shard, local_shard_path))
 
     def process_element(self, elem):
         if 'jpg' in elem.keys():

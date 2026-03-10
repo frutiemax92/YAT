@@ -8,19 +8,17 @@ from peft import LoraConfig, get_peft_model, PeftModel
 from peft import LoHaConfig, LoKrConfig, FourierFTConfig
 import os
 from diffusers.training_utils import EMAModel
-from diffusers import BitsAndBytesConfig
+from diffusers import BitsAndBytesConfig, SanaTransformer2DModel
 import bitsandbytes
 import random
 from torch.optim.lr_scheduler import LambdaLR
 import os
-from diffusers import SanaTransformer2DModel
-from utils.patched_sana_transformer import PatchedSanaTransformer2DModel
+from diffusers.training_utils import compute_density_for_timestep_sampling
 import math
 from common.repa import RepaModel, RepaConfig
 from accelerate.utils import InitProcessGroupKwargs
 from datetime import timedelta
-
-#from Sana.diffusion.utils.optimizer import CAME8BitWrapper
+from peft.helpers import rescale_adapter_scale
 
 class Model:
     def __init__(self, params : TrainingParameters):
@@ -34,6 +32,21 @@ class Model:
 
         self.process_index = self.accelerator.process_index
         self.num_processes = self.accelerator.num_processes
+
+        self.timesteps = [int(timestep) for timestep in params.timesteps]
+
+        # check if we have defined some training timesteps
+        if len(self.timesteps) != 0:
+            # override the select timesteps function
+            def get_timesteps_from_list(batch_size):
+                # the default behavior is to get the timesteps from a normal distribution
+                indices = [
+                    random.choice(self.timesteps)
+                    for _ in range(batch_size)
+                ]
+                return self.scheduler.timesteps[indices].to(self.accelerator.device)
+            
+            self.get_timesteps = get_timesteps_from_list
 
         # each gpu should have the same number of shards
         if self.params.dreambooth_dataset_folder == None:
@@ -65,6 +78,13 @@ class Model:
     def extract_latents(self, images):
         raise NotImplemented
     
+    def get_timesteps(self, batch_size):
+        # the default behavior is to get the timesteps from a normal distribution
+        u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=1.29)
+        indices = (u * self.scheduler.config.num_train_timesteps).long()
+        timesteps = self.scheduler.timesteps[indices].to(self.accelerator.device)
+        return timesteps
+    
     def extract_embeddings(self, captions):
         raise NotImplemented
     
@@ -84,12 +104,15 @@ class Model:
         # Return the result as a tuple (target_ratio, idx)
         return str(target_ratio)
     
+    # by default, we enable xformers
+    def enable_efficient_attention(self):
+        self.pipe.enable_xformers_memory_efficient_attention()
+        
     def initialize(self):
         # use flash attention
         # sana's transformer cannot use this
         torch.backends.cuda.enable_flash_sdp(True)
-        if not isinstance(self.model,  SanaTransformer2DModel) and not isinstance(self.model, PatchedSanaTransformer2DModel):
-            self.pipe.enable_xformers_memory_efficient_attention()
+        self.enable_efficient_attention()
         params = self.params
         if self.accelerator.is_main_process:
             self.logger = SummaryWriter()
@@ -229,6 +252,19 @@ class Model:
             else:
                 self.model = RepaModel.from_pretrained(self.model, self.params.repa_pretrained_model)
             self.model.to(torch.bfloat16)
+        
+        # check if we have timesteps, then apply a step callback
+        # currently, we only support peft models at inference
+        def step_callback(pipe, step, timestep, callback_kwargs):
+            if timestep.item() in self.timesteps:
+                rescale_adapter_scale(self.model, 1.0)
+            else:
+                rescale_adapter_scale(self.model, 0.0)
+
+            return callback_kwargs
+        self.validation_step_callback = None
+        if len(self.timesteps) != 0:
+            self.validation_step_callback =  step_callback
 
     def validate(self):
         raise NotImplemented
@@ -306,8 +342,17 @@ class Model:
                                 if self.ema_model != None:
                                     self.ema_model.store(self.model.parameters())  # Store original model weights
                                     self.ema_model.copy_to(self.model.parameters())
-                    
+                                
+                                # we need to check if we temporarly disable the peft adapter for the first inference step
+                                if len(self.timesteps) != 0:
+                                    if 0 in self.timesteps:
+                                        rescale_adapter_scale(self.model, 1.0)
+                                    else:
+                                        rescale_adapter_scale(self.model, 0.0)
                                 self.validate()
+
+                                if len(self.timesteps) != 0:
+                                    rescale_adapter_scale(self.model, 1.0)
                                 self.save_model()
                     
                                 if self.ema_model != None:

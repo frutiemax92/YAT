@@ -94,6 +94,9 @@ class SanaModel(Model):
         embeds = [prompt_embeds[idx][prompt_attention_mask[idx].bool()] for idx in range(len(prompt_embeds))]
         return embeds
     
+    def enable_efficient_attention(self):
+        pass
+    
     def validate(self):
         params = self.params
         vae = self.pipe.vae

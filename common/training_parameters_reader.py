@@ -46,6 +46,9 @@ class TrainingParameters:
         # low vram
         self.low_vram = None
         self.pretrained_pipe_single_file = None
+
+        # timesteps, this is used for a refiner model
+        self.timesteps = []
     
     def read_yaml(self, file):
         with open(file) as f:
@@ -98,6 +101,11 @@ class TrainingParameters:
         self.steps = int(yaml_root['steps'])
         self.num_steps_per_validation = int(yaml_root['num_steps_per_validation'])
         self.validation_prompts = yaml_root['validation_prompts']
+
+        # training timesteps
+        # this should be a list of integers
+        if 'timesteps' in yaml_root.keys():
+            self.timesteps = yaml_root['timesteps']
 
         # precalculate latents and embeddings to save swapping models to speed up training
         if 'cache_size' in yaml_root.keys():

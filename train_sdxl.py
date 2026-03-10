@@ -84,9 +84,6 @@ class SDXLModel(Model):
         text_encoder = self.pipe.text_encoder
         unet = self.pipe.unet
 
-        # convert to float16 as inference with bfloat16 is unstable
-        self.pipe.to(dtype=torch.float16, device=self.accelerator.device)
-
         pil_to_tensor = PILToTensor()
         idx = 0
         generator=torch.Generator(device="cuda").manual_seed(42)
@@ -119,7 +116,8 @@ class SDXLModel(Model):
                 guidance_scale=5.0,
                 num_inference_steps=20,
                 generator=generator,
-                output_type='latent'
+                output_type='latent',
+                callback_on_step_end=self.validation_step_callback,
             )[0]
             latents.append(latent)
 
@@ -166,10 +164,7 @@ class SDXLModel(Model):
 
         loss_fn = torch.nn.MSELoss()
         noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=torch.bfloat16)
-
-        u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=1.29)
-        indices = (u * self.scheduler.config.num_train_timesteps).long()
-        timesteps = self.scheduler.timesteps[indices].to(self.accelerator.device)
+        timesteps = self.get_timesteps(batch_size)
         noisy_model_input = self.scheduler.add_noise(latents.to(self.accelerator.device), noise, timesteps)
 
         original_size = self.aspect_ratios[str(ratio)]
