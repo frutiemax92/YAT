@@ -1,3 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+torch==2.10.0+cu128
+torchvision==0.21.0+cu128
+torchaudio==2.10.0+cu128
+
 numpy==1.26.4
 xformers
 diffusers==0.33.0
