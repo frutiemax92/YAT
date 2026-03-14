@@ -117,10 +117,8 @@ class SanaModel(Model):
                 self.pipe.encode_prompt(prompt)
             embeds.append((prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask))
         
-        text_encoder = text_encoder.cpu()
         self.pipe.text_encoder = None
-        self.pipe.transformer = transformer
-        transformer = transformer.to(self.accelerator.device)
+        self.pipe.transformer = self.accelerator.unwrap_model(transformer)
 
         for embed in tqdm.tqdm(embeds, desc='Generating validation latents'):
             prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = embed
@@ -137,11 +135,7 @@ class SanaModel(Model):
             )[0]
             latents.append(latent)
 
-        transformer = transformer.cpu()
-        self.pipe.transformer = None
-
         self.pipe.vae = vae
-        vae = vae.to(self.accelerator.device)
 
         idx = 0
         for latent in tqdm.tqdm(latents, desc='Decoding validation latents'):
@@ -152,10 +146,8 @@ class SanaModel(Model):
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image[0]), self.global_step)
             idx = idx + 1
         
-        self.pipe.vae.cpu()
         self.pipe.text_encoder = text_encoder
         self.pipe.transformer = transformer
-        self.pipe.transformer.to(dtype=torch.bfloat16, device=self.accelerator.device)
     
     def optimize(self, ratio, latents, embeddings):
         params = self.params

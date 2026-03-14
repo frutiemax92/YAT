@@ -18,6 +18,7 @@ from transformers import AutoImageProcessor, AutoModel
 import multiprocessing as mp
 import time
 import random
+import torch.distributed as dist
 from PIL import Image
 from PIL import ImageFile
 from queue import Empty
@@ -35,6 +36,7 @@ class Batch:
         self.repa_features = None
         self.ratio = None
 
+
 class BucketSampler:
     def __init__(self,
                  shards : list[str],
@@ -47,16 +49,18 @@ class BucketSampler:
                  r2_bucket_name : str,
                  cache_size : int,
                  seed : int,
+                 model,
                  use_repa : bool = False,
                  local_temp_dir : str = 'temp',
-                 local_paths: list[str] = None  
+                 local_paths: list[str] = None,
                  ):
         self.process_index = accelerator.process_index
         self.num_processes = accelerator.num_processes
         self.device = accelerator.device
         self.accelerator = accelerator
         self.shards = shards
-        self.buckets = {}
+        self.model = model
+        self.buckets = {float(key) : [] for key in model.aspect_ratios.keys()}
         self.valid_buckets = set()
         self.ready_bucket = -1.0
         self.seed = seed
@@ -70,8 +74,9 @@ class BucketSampler:
         self.features_path = features_path
         self.cache_size = cache_size
         self.local_paths = local_paths
+        self.bucket_to_yield = torch.tensor([-1])
 
-        def local_file_getter(self, process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
+        def local_file_getter(process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
             print('using local file getter')
             
             local_path = random.choice(self.local_paths)
@@ -82,9 +87,12 @@ class BucketSampler:
             # the simplest solution is to wait for to_remove
             r = to_remove.get()
 
-        def download_shard_worker(self, process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
+        def download_shard_worker(process_index : int,
+            to_train : mp.Queue, 
+            to_remove : mp.Queue):
             current_item = 0
             num_shards = 0
+            random.seed(self.process_index + self.seed)
             while True:
                 if to_train.qsize() < 4:
                     current_shard_index = self.get_next_shard_index()
@@ -106,7 +114,6 @@ class BucketSampler:
 
                 try:
                     r = to_remove.get(timeout=10)
-                    print(f'removing shard {r}')
                     self.cleanup_shard(r)
                 except:
                     pass
@@ -153,7 +160,6 @@ class BucketSampler:
         # Clean up at end of shard
         if os.path.exists(local_shard_path):
             os.remove(local_shard_path)
-            print(f'removing shard {local_shard_path}')
     
     def get_invalid_bucket(self):
         return [-1.0]
@@ -171,8 +177,11 @@ class BucketSampler:
         pass
 
     def find_closest_key(self, ratio):
+        if ratio == -1.0:
+            return -1.0
+        
         error = 1000
-        res = -1
+        res = -1.0
         for r in self.buckets.keys():
             new_error = abs(ratio - r)
             if new_error < error:
@@ -188,15 +197,15 @@ class BucketSampler:
     
     def __iter__(self):
         sync_counter = 0
-        random.seed(self.process_index + self.seed)
         
         # start the download process
         to_train = mp.Queue()
         to_remove = mp.Queue()
-        p = mp.Process(target=self.download_shard_proc, args=(self, self.process_index, to_train, to_remove))
+        p = mp.Process(target=self.download_shard_proc, args=(self.process_index, to_train, to_remove))
         p.start()
+
+        cache_index = 0
         while True:
-            # this will wait for a valid shard path
             local_shard_path = self.get_local_shard_path(to_train)
 
             dataset = (
@@ -204,62 +213,46 @@ class BucketSampler:
                 .shuffle(1000)
                 .decode(self.pt_decoder)
             )
-            
+
             for elem in dataset:
                 self.process_element(elem)
-                
-                # Check for valid buckets before synchronization
-                for r in list(self.buckets.keys()):
-                    if len(self.buckets[r]) >= self.batch_size:
-                        self.valid_buckets.add(r)
-                
-                bucket_list = list(self.valid_buckets)
-                max_buckets = 100
+                cache_index = cache_index + 1
 
-                # Convert to list of [is_reg_pass, ratio]
-                bucket_arr = [
-                    [float(r[0]), float(r[1])] if isinstance(r, tuple) else float(r)
-                    for r in bucket_list
-                ]
+                if cache_index >= self.cache_size:
+                    self.accelerator.wait_for_everyone()
+                    cache_index = 0
 
-                # Pad to fixed size
-                bucket_arr = bucket_arr[:max_buckets] + self.get_invalid_bucket() * (max_buckets - len(bucket_arr))
-                bucket_tensor = torch.tensor(bucket_arr, device=self.device, dtype=torch.float32)
-                
-                #try:
-                # Gather valid buckets across processes
-                dist_valid_buckets = self.accelerator.gather(bucket_tensor)
-                ratio_counts = self.get_unique_ratios(dist_valid_buckets)
-                
-                for ratio, count in ratio_counts.items():
-                    if count >= self.num_processes:
-                        closest_ratio = self.find_closest_key(ratio)
-                        batch = ([self.buckets[closest_ratio][i][0] for i in range(self.batch_size)],
-                                [self.buckets[closest_ratio][i][1] for i in range(self.batch_size)])
+                    # consume all the accumulated samples in the buckets
+                    # this should be deterministic across all processes...
+                    for key in self.buckets.keys():
+                        num_samples = torch.tensor(len(self.buckets[key]), dtype=torch.int64, device=self.accelerator.device)
+                        num_samples = self.accelerator.gather(num_samples)
                         
-                        # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
-                        # as extracting features tends to use more VRAM than actually training the model
-                        # we freeze the vae and text encoder model
-                        ratio = self.get_ratio_from_key(closest_ratio)
-                        vae_features, embeddings, repa_features = self.extract_features(batch, ratio)
-
-                        batch = Batch()
-                        batch.ratio = ratio
-                        batch.embeddings = embeddings
-                        batch.vae_features = vae_features
-                        if self.use_repa:
-                            batch.repa_features = repa_features
-
-                        yield batch
+                        is_ok = torch.min(num_samples) >= self.batch_size
+                        is_ok = bool(is_ok.item())
                         
-                        # Clean up after yielding
-                        self.buckets[closest_ratio].clear()
-                        self.valid_buckets.remove(closest_ratio)
-                        break
+                        #self.accelerator.wait_for_everyone()
+                        if is_ok:
+                            # consume batch_size samples for the current bucket
+                            closest_ratio = key
+                            batch = ([self.buckets[closest_ratio][i][0] for i in range(self.batch_size)],
+                                    [self.buckets[closest_ratio][i][1] for i in range(self.batch_size)])
                             
-                #except Exception as e:
-                    #print(f"Process {self.process_index} gather error: {e}")
-                    #continue
+                            # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
+                            # as extracting features tends to use more VRAM than actually training the model
+                            # we freeze the vae and text encoder model
+                            ratio = self.get_ratio_from_key(closest_ratio)
+                            vae_features, embeddings, repa_features = self.extract_features(batch, ratio)
+
+                            batch = Batch()
+                            batch.ratio = ratio
+                            batch.embeddings = embeddings
+                            batch.vae_features = vae_features
+                            if self.use_repa:
+                                batch.repa_features = repa_features
+                            yield batch
+                            self.buckets[closest_ratio] = self.buckets[closest_ratio][self.batch_size:]
+                        
             self.remove_shard(to_remove, local_shard_path)
 
 class BucketSamplerExtractFeatures(BucketSampler):
@@ -291,6 +284,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
                          r2_bucket_name,
                          local_temp_dir,
                          seed,
+                         model,
                          use_repa,
                         local_paths=local_paths)
         self.vae_max_batch_size = vae_max_batch_size
@@ -420,7 +414,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
         self.reg_shard = False
 
         # this is a hack to reuse the existing code!
-        def download_shard_worker(self, process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
+        def download_shard_worker(process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
             current_item = 0
             while True:
                 if to_train.qsize() < 4:
@@ -485,12 +479,15 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
         ratio = img.height / img.width
         ratio = float(ratio)
         ratio = self.find_closest_ratio(ratio)
+        self.buckets[ratio].append((img, caption, self.reg_shard))
 
-        ratio = (float(self.reg_shard), ratio)
-        if not ratio in self.buckets.keys():
-            self.add_bucket(ratio)
-        self.buckets[ratio].append((img, caption))
+    def extract_features(self, batch, ratio):
+        super().extract_features(batch, ratio)
 
+        is_reg = [self.buckets[ratio][i][2] for i in range(self.batch_size)]
+        #if is_reg[0]
+
+        is_reg = batch
     def get_ratio_from_key(self, key):
         if bool(key[0]) == True:
             new_lr = self.model.params.learning_rate * self.dreambooth_lambda
@@ -533,3 +530,75 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
             if pair[1].item() != -1.0  # filter invalid ratio
         }
         return ratio_counts
+
+## dual-gpu BucketSampler __iter__ patch
+
+def dual_gpu_bucket_sampler_iter(self):
+    random.seed(self.process_index + self.seed)
+    print('using dual_gpu_bucket_sampler_iter')
+
+    # start the download process
+    to_train = mp.Queue()
+    to_remove = mp.Queue()
+    p = mp.Process(target=self.download_shard_proc, args=(self, self.process_index, to_train, to_remove))
+
+    # download/process the elements
+    if self.accelerator.process_index == 1:
+        p.start()
+
+    def features_yielding_process(self):
+        while True:
+            obj = [None]
+            dist.recv_object_list(obj, src=1)
+            yield obj[0]
+
+
+    def extract_features_process(self):
+        while True:
+            # this will wait for a valid shard path
+            local_shard_path = self.get_local_shard_path(to_train)
+
+            dataset = (
+                wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None)
+                .shuffle(1000)
+                .decode(self.pt_decoder)
+            )
+            
+            for elem in dataset:
+                self.process_element(elem)
+                
+                # Check for valid buckets before synchronization
+                for r in list(self.buckets.keys()):
+                    if len(self.buckets[r]) >= self.batch_size:
+                        closest_ratio = self.find_closest_key(r)
+                        batch = ([self.buckets[closest_ratio][i][0] for i in range(self.batch_size)],
+                                [self.buckets[closest_ratio][i][1] for i in range(self.batch_size)])
+                        
+                        # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
+                        # as extracting features tends to use more VRAM than actually training the model
+                        # we freeze the vae and text encoder model
+                        ratio = self.get_ratio_from_key(closest_ratio)
+                        vae_features, embeddings, repa_features = self.extract_features(batch, ratio)
+                        
+
+                        batch = Batch()
+                        batch.ratio = ratio
+                        batch.embeddings = embeddings
+                        batch.vae_features = vae_features
+                        if self.use_repa:
+                            batch.repa_features = repa_features
+
+                        # send those to gpu0
+                        dist.send_object_list([batch], 0)
+                        
+                        # Clean up after yielding
+                        self.buckets[closest_ratio].clear()
+                        break
+            self.remove_shard(to_remove, local_shard_path)
+    
+    if self.accelerator.process_index == 0:
+        yield from features_yielding_process(self)
+
+    else:
+        # dont yield anything
+        extract_features_process(self)

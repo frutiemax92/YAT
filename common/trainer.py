@@ -178,6 +178,15 @@ class Model:
                             use_repa=params.use_repa,
                             local_paths=self.params.local_shard_paths)
         #self.sampler = self.accelerator.prepare(self.sampler)
+
+        # apply the dual gpu patch
+        from common.bucket_sampler import dual_gpu_bucket_sampler_iter
+        class PatchedSampler(type(self.sampler)):
+            def __iter__(self):
+                return dual_gpu_bucket_sampler_iter(self)
+
+        if self.params.dual_gpu:
+            self.sampler.__class__ = PatchedSampler
         
         # check for lora training
         if self.params.lora_rank != None:
@@ -220,8 +229,10 @@ class Model:
                                                 weight_decay=params.weight_decay)
         else:
             self.optimizer = bitsandbytes.optim.Lion8bit(params=params_to_optimizer, lr=params.learning_rate, weight_decay=params.weight_decay)
-        self.optimizer = self.accelerator.prepare(self.optimizer)
-        #self.model = self.accelerator.prepare(self.model)
+
+        if self.params.dual_gpu == False:
+            self.optimizer = self.accelerator.prepare(self.optimizer)
+            self.model = self.accelerator.prepare(self.model)
 
         warmup_steps = params.warmup_steps
         self.lr_scheduler = None
@@ -276,7 +287,7 @@ class Model:
         pass
 
     def save_model(self):
-        self.model.save_pretrained(f'models/{self.global_step}')
+        self.accelerator.unwrap_model(self.model).save_pretrained(f'models/{self.global_step}')
     
     def run(self):
         params = self.params
@@ -290,7 +301,7 @@ class Model:
             for batch in self.sampler:
                 ratio = batch.ratio
                 latents = batch.vae_features
-                embeddings = batch.embeddings    
+                embeddings = batch.embeddings
                 with self.accelerator.accumulate(self.model):
                     # randomly train with the unconditional embedding
                     prob = random.random()
@@ -315,10 +326,13 @@ class Model:
 
                         if self.lr_scheduler != None:
                             self.lr_scheduler.step()
+
                         self.optimizer.zero_grad()
                 
                 if self.accelerator.sync_gradients:
-                    mean_loss = torch.mean(self.accelerator.gather(avg_loss))
+                    if self.params.dual_gpu == False:
+                        mean_loss = torch.mean(self.accelerator.gather(avg_loss))
+                    mean_loss = avg_loss
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
 
                     if self.logger != None:
@@ -335,7 +349,8 @@ class Model:
                             # ✅ Run reduction on ALL processes to sync EMA parameters
                             if self.ema_model != None:
                                 for param in self.ema_model.shadow_params:
-                                    param.data = self.accelerator.reduce(param.data, reduction="mean")
+                                    if self.params.dual_gpu == False:
+                                        param.data = self.accelerator.reduce(param.data, reduction="mean")
                     
                             # ✅ Ensure store() is called before restore()
                             if self.accelerator.is_main_process:
@@ -359,6 +374,8 @@ class Model:
                                     self.ema_model.restore(self.model.parameters())
                     progress_bar.update(1)
                     self.global_step = self.global_step + 1
-                    self.accelerator.wait_for_everyone()
+
+                    #if self.params.dual_gpu == False:
+                        #self.accelerator.wait_for_everyone()
             # if hasattr(self, 'repa_model'):
             #     self.repa_model.cpu()

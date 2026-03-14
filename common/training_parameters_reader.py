@@ -47,6 +47,8 @@ class TrainingParameters:
         self.low_vram = None
         self.pretrained_pipe_single_file = None
 
+        self.dual_gpu = False
+
         # timesteps, this is used for a refiner model
         self.timesteps = []
     
@@ -101,6 +103,7 @@ class TrainingParameters:
         self.steps = int(yaml_root['steps'])
         self.num_steps_per_validation = int(yaml_root['num_steps_per_validation'])
         self.validation_prompts = yaml_root['validation_prompts']
+        self.dual_gpu = 'dual_gpu' in yaml_root.keys()
 
         # training timesteps
         # this should be a list of integers

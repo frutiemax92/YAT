@@ -100,10 +100,10 @@ class SDXLModel(Model):
                     do_classifier_free_guidance=True)
             embeds.append((prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds))
         
-        text_encoder = text_encoder.cpu()
         self.pipe.text_encoder = None
         self.pipe.unet = unet
         unet = unet.to(self.accelerator.device)
+        self.pipe.unet = self.accelerator.unwrap_model(self.model).eval()
 
         for embed in tqdm.tqdm(embeds, desc='Generating validation latents'):
             prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = embed
@@ -121,7 +121,6 @@ class SDXLModel(Model):
             )[0]
             latents.append(latent)
 
-        unet = unet.cpu()
         self.pipe.unet = None
 
         self.pipe.vae = vae
@@ -136,7 +135,6 @@ class SDXLModel(Model):
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image[0]), self.global_step)
             idx = idx + 1
         
-        self.pipe.vae.cpu()
         self.pipe.text_encoder = text_encoder
         self.pipe.unet = unet
         self.pipe.unet.to(dtype=torch.bfloat16, device=self.accelerator.device)

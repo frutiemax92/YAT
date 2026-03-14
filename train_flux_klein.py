@@ -73,9 +73,6 @@ class KleinModel(Model):
 
         negative_prompt = ""
         idx = 0
-
-        self.pipe.transformer.cpu()
-        self.pipe.vae.cpu()
         torch.cuda.empty_cache()
 
         embeds = []
@@ -91,8 +88,6 @@ class KleinModel(Model):
 
         text_encoder = self.pipe.text_encoder
         text_encoder.cpu()
-        
-        self.pipe.text_encoder = None
         self.pipe.to(self.accelerator.device)
         torch.cuda.empty_cache()
 
