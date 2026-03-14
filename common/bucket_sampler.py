@@ -251,7 +251,12 @@ class BucketSampler:
                             if self.use_repa:
                                 batch.repa_features = repa_features
                             yield batch
-                            self.buckets[closest_ratio] = self.buckets[closest_ratio][self.batch_size:]
+                            self.buckets[closest_ratio].clear()
+
+                            del batch
+                            del vae_features
+                            del embeddings
+                            gc.collect()
                         
             self.remove_shard(to_remove, local_shard_path)
 
@@ -479,23 +484,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
         ratio = img.height / img.width
         ratio = float(ratio)
         ratio = self.find_closest_ratio(ratio)
-        self.buckets[ratio].append((img, caption, self.reg_shard))
-
-    def extract_features(self, batch, ratio):
-        super().extract_features(batch, ratio)
-
-        is_reg = [self.buckets[ratio][i][2] for i in range(self.batch_size)]
-        #if is_reg[0]
-
-        is_reg = batch
-    def get_ratio_from_key(self, key):
-        if bool(key[0]) == True:
-            new_lr = self.model.params.learning_rate * self.dreambooth_lambda
-        else:
-            new_lr = self.model.params.learning_rate
-        for param_group in self.model.optimizer.param_groups:
-            param_group["lr"] = new_lr
-        return key[1]
+        self.buckets[ratio].append((img, caption))
 
     def find_closest_key(self, ratio):
         error = 1000
