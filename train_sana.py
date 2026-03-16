@@ -52,7 +52,7 @@ class SanaModel(Model):
     def initialize(self):
         super().initialize()
         #self.pipe = self.pipe.to(self.accelerator.device)
-        self.pipe.transformer = self.model
+        self.pipe.transformer = self.accelerator.unwrap_model(self.model)
         transformer = self.pipe.transformer
         vae = self.pipe.vae
         text_encoder = self.pipe.text_encoder
