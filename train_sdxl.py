@@ -48,18 +48,12 @@ class SDXLModel(Model):
         unet = self.pipe.unet
         vae = self.pipe.vae
         text_encoder = self.pipe.text_encoder
-        
-        unet = unet.to(self.accelerator.device)
-        vae.cpu()
-        text_encoder.cpu()
     
     def format_embeddings(self, embeds):
         pass
     
     def extract_latents(self, images):
-        # put the vae on the gpu if it's not already
-        vae = self.pipe.vae
-        vae = vae.to(device=self.accelerator.device)
+        self.pipe.vae.to(device=self.accelerator.device)
         output = self.pipe.vae.encode(images.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)).latent_dist.sample()
         return output * self.pipe.vae.config.scaling_factor
 
@@ -80,9 +74,6 @@ class SDXLModel(Model):
     
     def validate(self):
         params = self.params
-        vae = self.pipe.vae
-        text_encoder = self.pipe.text_encoder
-        unet = self.pipe.unet
 
         pil_to_tensor = PILToTensor()
         idx = 0
@@ -90,58 +81,47 @@ class SDXLModel(Model):
         latents = []
         embeds = []
         for prompt in tqdm.tqdm(params.validation_prompts, desc='Generating validation embeddings'):
-            text_encoder = text_encoder.to(device=self.accelerator.device)
-            self.pipe.text_encoder = text_encoder
             prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = \
                 self.pipe.encode_prompt(
                     prompt,
+                    negative_prompt='illustration',
                     device=self.accelerator.device,
                     num_images_per_prompt=1,
                     do_classifier_free_guidance=True)
             embeds.append((prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds))
         
-        self.pipe.text_encoder = None
-        self.pipe.unet = unet
-        unet = unet.to(self.accelerator.device)
         self.pipe.unet = self.accelerator.unwrap_model(self.model).eval()
 
         for embed in tqdm.tqdm(embeds, desc='Generating validation latents'):
             prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = embed
             latent = self.pipe(
                 negative_prompt=None,
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                negative_prompt_embeds=negative_prompt_embeds,
-                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                prompt_embeds=prompt_embeds.to(device=self.model.device),
+                pooled_prompt_embeds=pooled_prompt_embeds.to(device=self.model.device),
+                negative_prompt_embeds=negative_prompt_embeds.to(device=self.model.device),
+                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds.to(device=self.model.device),
                 guidance_scale=5.0,
                 num_inference_steps=20,
                 generator=generator,
                 output_type='latent',
                 callback_on_step_end=self.validation_step_callback,
             )[0]
-            latents.append(latent)
-
-        self.pipe.unet = None
-
-        self.pipe.vae = vae
-        vae = vae.to(self.accelerator.device)
+            latents.append(latent.to(device=self.pipe.vae.device))
 
         idx = 0
+        print(self.pipe.vae.device)
         for latent in tqdm.tqdm(latents, desc='Decoding validation latents'):
             prompt = params.validation_prompts[idx]
-            latent = latent.to(vae.dtype)
-            image = vae.decode(latent / vae.config.scaling_factor, return_dict=False)[0]
+            latent = latent.to(self.pipe.vae.dtype)
+            image = self.pipe.vae.decode(latent / self.pipe.vae.config.scaling_factor, return_dict=False)[0]
             image = self.pipe.image_processor.postprocess(image)
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image[0]), self.global_step)
             idx = idx + 1
-        
-        self.pipe.text_encoder = text_encoder
-        self.pipe.unet = unet
-        self.pipe.unet.to(dtype=torch.bfloat16, device=self.accelerator.device)
 
     def optimize(self, ratio, latents, embeddings):
         params = self.params
         batch_size = params.batch_size
+        self.model.to(self.accelerator.device)
 
         # pad the embeds to 512 tokens and generate the corresponding mask
         embeds = []

@@ -250,6 +250,7 @@ class BucketSampler:
                             batch.vae_features = vae_features
                             if self.use_repa:
                                 batch.repa_features = repa_features
+                            
                             yield batch
                             self.buckets[closest_ratio].clear()
 
@@ -320,12 +321,9 @@ class BucketSamplerExtractFeatures(BucketSampler):
         ratio = img.height / img.width
         ratio = float(ratio)
         ratio = self.find_closest_ratio(ratio)
-        if not ratio in self.buckets.keys():
-            self.add_bucket(ratio)
-
         self.buckets[ratio].append((img, caption))
     
-    def extract_features(self, batch, ratio):
+    def extract_features(self, batch, ratio, low_vram=False):
         # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
         # as extracting features tends to use more VRAM than actually training the model
         # we freeze the vae and text encoder model
@@ -335,6 +333,9 @@ class BucketSamplerExtractFeatures(BucketSampler):
 
         transform = self.get_transform(ratio)
         with torch.no_grad():
+            if low_vram:
+                self.model.pipe.text_encoder.cpu()
+                torch.cuda.empty_cache()
             flush()
             for i in range(0, len(batch[0]), self.vae_max_batch_size):
                 end_index = min(len(batch[0]), i+self.vae_max_batch_size)
@@ -343,6 +344,9 @@ class BucketSamplerExtractFeatures(BucketSampler):
                 features = self.model.extract_latents(images)
                 vae_features.extend(features)
             
+            if low_vram:
+                self.model.pipe.vae.cpu()
+                torch.cuda.empty_cache()
             flush()
             for i in range(0, len(batch[1]), self.text_encoder_max_batch_size):
                 end_index = min(len(batch[1]), i+self.text_encoder_max_batch_size)
@@ -358,6 +362,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
                 outputs = self.repa_model(inputs)
 
                 repa_features = outputs.pooler_output
+
         return torch.stack(vae_features), embeddings, repa_features
     
     def get_transform(self, bucket):
@@ -529,7 +534,7 @@ def dual_gpu_bucket_sampler_iter(self):
     # start the download process
     to_train = mp.Queue()
     to_remove = mp.Queue()
-    p = mp.Process(target=self.download_shard_proc, args=(self, self.process_index, to_train, to_remove))
+    p = mp.Process(target=self.download_shard_proc, args=(self.process_index, to_train, to_remove))
 
     # download/process the elements
     if self.accelerator.process_index == 1:
@@ -559,7 +564,7 @@ def dual_gpu_bucket_sampler_iter(self):
                 # Check for valid buckets before synchronization
                 for r in list(self.buckets.keys()):
                     if len(self.buckets[r]) >= self.batch_size:
-                        closest_ratio = self.find_closest_key(r)
+                        closest_ratio = r
                         batch = ([self.buckets[closest_ratio][i][0] for i in range(self.batch_size)],
                                 [self.buckets[closest_ratio][i][1] for i in range(self.batch_size)])
                         
@@ -567,8 +572,7 @@ def dual_gpu_bucket_sampler_iter(self):
                         # as extracting features tends to use more VRAM than actually training the model
                         # we freeze the vae and text encoder model
                         ratio = self.get_ratio_from_key(closest_ratio)
-                        vae_features, embeddings, repa_features = self.extract_features(batch, ratio)
-                        
+                        vae_features, embeddings, repa_features = self.extract_features(batch, ratio, low_vram=True)
 
                         batch = Batch()
                         batch.ratio = ratio

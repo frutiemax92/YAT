@@ -38,15 +38,9 @@ class KleinModel(Model):
 
     def initialize(self):
         super().initialize()
-        self.pipe = self.pipe.to(self.accelerator.device)
-        self.pipe.transformer = self.model
-        transformer = self.pipe.transformer
-        transformer.to(self.accelerator.device)
 
         self.latents_bn_mean = self.pipe.vae.bn.running_mean.view(1, -1, 1, 1).to(self.accelerator.device)
-        self.latents_bn_std = torch.sqrt(self.pipe.vae.bn.running_var.view(1, -1, 1, 1) + self.pipe.vae.config.batch_norm_eps).to(
-            self.accelerator.device
-            )
+        self.latents_bn_std = torch.sqrt(self.pipe.vae.bn.running_var.view(1, -1, 1, 1) + self.pipe.vae.config.batch_norm_eps)
     
     def format_embeddings(self, embeds):
         pass
@@ -56,15 +50,16 @@ class KleinModel(Model):
         self.pipe.vae.to(device=self.accelerator.device)
         output = self.pipe.vae.encode(images.to(dtype=self.pipe.vae.dtype)).latent_dist.mode()
         output = Flux2KleinPipeline._patchify_latents(output)
-        output = (output - self.latents_bn_mean) / self.latents_bn_std
+        output = (output - self.latents_bn_mean.to(self.pipe.vae.device)) / self.latents_bn_std.to(self.pipe.vae.device)
         return output.to(torch.bfloat16)
 
     def extract_embeddings(self, captions):
         # move text_encoder to cuda if not already done
+        print(f'extract_embedding, device={self.accelerator.device}')
         self.pipe.text_encoder.to(device=self.accelerator.device)
         prompt_embeds, text_ids = \
         self.pipe.encode_prompt(captions,
-                                device=self.accelerator.device)
+                                device=self.pipe.text_encoder.device)
         return [(prompt_embeds[idx], text_ids[idx]) for idx in range(len(prompt_embeds))]
     
     def validate(self):
@@ -110,6 +105,9 @@ class KleinModel(Model):
     def optimize(self, ratio, latents, embeddings):
         params = self.params
         batch_size = params.batch_size
+        self.pipe.text_encoder.cpu()
+        self.pipe.vae.cpu()
+        self.model.to(self.accelerator.device)
 
         # pad the embeds to 512 tokens and generate the corresponding mask
         prompt_embeds = []

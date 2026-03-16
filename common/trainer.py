@@ -310,6 +310,7 @@ class Model:
                         for idx in range(len(embeddings)):
                             embeddings[idx] = self.empty_embeddings[0]
                     loss = self.optimize(ratio, latents, embeddings)
+                    
 
                     if self.params.use_repa:
                         loss = loss + self.params.repa_lambda * self.model.calculate_loss(batch.repa_features)
@@ -364,7 +365,10 @@ class Model:
                                         rescale_adapter_scale(self.model, 1.0)
                                     else:
                                         rescale_adapter_scale(self.model, 0.0)
-                                self.validate()
+
+                                # for now, validating with this patch is disabled
+                                if self.params.dual_gpu == False:
+                                    self.validate()
 
                                 if len(self.timesteps) != 0:
                                     rescale_adapter_scale(self.model, 1.0)
