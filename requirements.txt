@@ -1,8 +1,11 @@
+--index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://pypi.org/simple
+
 hf_transfer
-numpy==1.26.4
+numpy
 xformers
-diffusers==0.33.0
-transformers==4.55.0
+diffusers
+transformers
 accelerate
 beautifulsoup4
 ftfy
@@ -14,3 +17,8 @@ peft
 timm
 spacy
 SentencePiece
+safetensors
+botocore
+s3transfer
+huggingface_hub
+regex
