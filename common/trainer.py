@@ -19,15 +19,22 @@ from common.repa import RepaModel, RepaConfig
 from accelerate.utils import InitProcessGroupKwargs
 from datetime import timedelta
 from peft.helpers import rescale_adapter_scale
+from accelerate.utils import DeepSpeedPlugin
+
+
 
 class Model:
     def __init__(self, params : TrainingParameters):
         os.environ['NCCL_P2P_DISABLE'] = '1'
         os.environ['NCCL_IB_DISABLE'] = '1'
         os.environ["NCCL_TIMEOUT"] = "100000000"
+
         self.accelerator = Accelerator(
-            gradient_accumulation_steps=params.gradient_accumulation_steps, 
+            gradient_accumulation_steps=params.gradient_accumulation_steps,
             kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(seconds=3600))])
+        self.accelerator.state.deepspeed_plugin.deepspeed_config[
+            "train_micro_batch_size_per_gpu"
+        ] = params.batch_size
         self.params = params
 
         self.process_index = self.accelerator.process_index
@@ -231,8 +238,7 @@ class Model:
             self.optimizer = bitsandbytes.optim.Lion8bit(params=params_to_optimizer, lr=params.learning_rate, weight_decay=params.weight_decay)
 
         if self.params.dual_gpu == False:
-            self.optimizer = self.accelerator.prepare(self.optimizer)
-            self.model = self.accelerator.prepare(self.model)
+            self.optimizer, self.model, self.sampler = self.accelerator.prepare(self.optimizer, self.model, self.sampler)
 
         warmup_steps = params.warmup_steps
         self.lr_scheduler = None
