@@ -32,9 +32,11 @@ class Model:
         self.accelerator = Accelerator(
             gradient_accumulation_steps=params.gradient_accumulation_steps,
             kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(seconds=3600))])
-        self.accelerator.state.deepspeed_plugin.deepspeed_config[
-            "train_micro_batch_size_per_gpu"
-        ] = params.batch_size
+
+        if hasattr(self.accelerator.state, 'deepseed'):
+            self.accelerator.state.deepspeed_plugin.deepspeed_config[
+                "train_micro_batch_size_per_gpu"
+            ] = params.batch_size
         self.params = params
 
         self.process_index = self.accelerator.process_index
