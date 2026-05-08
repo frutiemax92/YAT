@@ -200,7 +200,6 @@ class Model:
         # check for lora training
         if self.params.lora_rank != None:
             dtype = self.model.dtype
-            device = self.model.device
             if self.params.lora_pretrained == None:
                 if params.lora_algo == 'lora':
                     config = LoraConfig(r=params.lora_rank,

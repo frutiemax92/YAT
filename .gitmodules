@@ -1,0 +1,3 @@
+[submodule "PixelDiT"]
+	path = PixelDiT
+	url = https://github.com/NVlabs/PixelDiT.git

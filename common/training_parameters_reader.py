@@ -96,7 +96,7 @@ class TrainingParameters:
         # this is used for loading the sd1.5 compvis safetensors format
         if 'pretrained_pipe_single_file' in yaml_root.keys():
             self.pretrained_pipe_single_file = yaml_root['pretrained_pipe_single_file']
-        else:
+        if 'pretrained_pipe_path' in yaml_root.keys():
             self.pretrained_pipe_path = yaml_root['pretrained_pipe_path']
         
         self.learning_rate = float(yaml_root['learning_rate'])
