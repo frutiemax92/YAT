@@ -22,3 +22,6 @@ botocore
 s3transfer
 huggingface_hub
 regex
+pyrallis
+termcolor
+pytz

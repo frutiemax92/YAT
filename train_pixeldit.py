@@ -67,7 +67,6 @@ class PixelDITModel(Model):
             use_flow_sigmas=True,  # Enable flow matching mode
             flow_shift=config.scheduler.flow_shift,  # Use flow_shift from config
         )
-        self.inference_scheduler.set_timesteps(20)
         self.text_encoder.train(False)
         self.aspect_ratios = ASPECT_RATIO_1024_BIN
     
@@ -116,6 +115,7 @@ class PixelDITModel(Model):
                 WIDTH,
                 device=self.accelerator.device,
             )
+            self.inference_scheduler.set_timesteps(20)
             x = z
             for i, t in tqdm.tqdm(enumerate(self.inference_scheduler.timesteps)):
                 # The model expects 'y' as the conditioning argument (caption_embs)
@@ -137,7 +137,13 @@ class PixelDITModel(Model):
                 x = step_output.prev_sample if hasattr(step_output, 'prev_sample') else step_output
 
             samples = x
-            self.logger.add_image(f'validation/{idx}/{prompt}', samples.mul(255).add(0.5), self.global_step)
+            # PixelDiT outputs are in [-1, 1], so normalize before logging.
+            image = samples[0].add(1.0).div(2.0).clamp(0.0, 1.0)
+            self.logger.add_image(
+                f'validation/{idx}/{prompt}',
+                image,
+                self.global_step,
+            )
             idx = idx + 1
     
     def optimize(self, ratio, latents, embeddings):

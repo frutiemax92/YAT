@@ -16,7 +16,7 @@ import os
 from diffusers.training_utils import compute_density_for_timestep_sampling
 import math
 from common.repa import RepaModel, RepaConfig
-from accelerate.utils import InitProcessGroupKwargs
+from accelerate.utils import InitProcessGroupKwargs, DistributedDataParallelKwargs
 from datetime import timedelta
 from peft.helpers import rescale_adapter_scale
 from accelerate.utils import DeepSpeedPlugin
@@ -31,7 +31,11 @@ class Model:
 
         self.accelerator = Accelerator(
             gradient_accumulation_steps=params.gradient_accumulation_steps,
-            kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(seconds=3600))])
+            kwargs_handlers=[
+                InitProcessGroupKwargs(timeout=timedelta(seconds=3600)),
+                DistributedDataParallelKwargs(find_unused_parameters=True),
+            ],
+        )
 
         if hasattr(self.accelerator.state, 'deepseed'):
             self.accelerator.state.deepspeed_plugin.deepspeed_config[
