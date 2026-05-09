@@ -263,17 +263,6 @@ class Model:
         # extract empty embedding
         with torch.no_grad():
             self.empty_embeddings = self.extract_embeddings([''])
-
-        # check if we use repa
-        if self.params.use_repa:
-            repa_config = RepaConfig(target_modules=['transformer_blocks.0', 'transformer_blocks.1', 'transformer_blocks.2'], 
-                                     hidden_shape=[1152, 1152, 1152])
-
-            if self.params.repa_pretrained_model == None:
-                self.model = RepaModel(self.model, repa_config)
-            else:
-                self.model = RepaModel.from_pretrained(self.model, self.params.repa_pretrained_model)
-            self.model.to(torch.bfloat16)
         
         # check if we have timesteps, then apply a step callback
         # currently, we only support peft models at inference
@@ -296,6 +285,9 @@ class Model:
 
     def finalize(self):
         pass
+
+    def repa_loss(self, batch):
+        return 0.0
 
     def save_model(self):
         self.accelerator.unwrap_model(self.model).save_pretrained(f'models/{self.global_step}')
@@ -324,7 +316,7 @@ class Model:
                     
 
                     if self.params.use_repa:
-                        loss = loss + self.params.repa_lambda * self.model.calculate_loss(batch.repa_features)
+                        loss = loss + self.config.repa_lambda * self.repa_loss
 
                     avg_loss = avg_loss + loss
                     self.accelerator.backward(loss)

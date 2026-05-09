@@ -33,6 +33,8 @@ from PixelDiT.t2i.inference import PixelDiTInference
 import pyrallis
 from huggingface_hub import hf_hub_download
 from torch.utils.checkpoint import checkpoint
+from peft import PeftModel
+import torch.nn as nn
 
 class PixelDITModel(Model):
     def __init__(self, params : TrainingParameters):
@@ -52,7 +54,10 @@ class PixelDITModel(Model):
         state_dict = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
         if "pos_embed" in state_dict["state_dict"]:
             del state_dict["state_dict"]["pos_embed"]
+
+        print(self.model)
         self.model.load_state_dict(state_dict["state_dict"], strict=False)
+        self._repa_projector = self.model._repa_projector
         
         self.scheduler = DPMSolverMultistepScheduler(
             num_train_timesteps=1000,
@@ -82,6 +87,36 @@ class PixelDITModel(Model):
         self.model.to(self.accelerator.device)
         #vae.cpu()
         #text_encoder.cpu()
+        self.empty_embeddings, _ = self.empty_embeddings
+
+    def repa_loss(self, batch):
+        repa_tokens = batch.repa_features
+        import torch.nn.functional as F
+
+        proj_tokens = self._repa_projector(self.model.last_repa_tokens)  # [B, L, 768]
+        proj_tokens = F.normalize(proj_tokens, dim=-1)
+        B, Td, C = repa_tokens.shape
+        Bu, Tu, Cu = proj_tokens.shape
+        h_u = int(Tu ** 0.5)
+        h_d = int(Td ** 0.5)
+        if h_u * h_u == Tu and h_d * h_d == Td:
+            if Td > Tu:
+                dino_2d = repa_tokens.permute(0, 2, 1).reshape(B, C, h_d, h_d)
+                dino_resized = F.interpolate(dino_2d, size=(h_u, h_u), mode="bilinear", align_corners=False)
+                dino_resized = dino_resized.flatten(2).permute(0, 2, 1)
+                dino_resized = F.normalize(dino_resized, dim=-1)
+                result = -((proj_tokens * dino_resized).sum(dim=-1)).mean()
+            elif Td < Tu:
+                usit_2d = proj_tokens.permute(0, 2, 1).reshape(Bu, Cu, h_u, h_u)
+                usit_resized = F.interpolate(usit_2d, size=(h_d, h_d), mode="bilinear", align_corners=False)
+                usit_resized = usit_resized.flatten(2).permute(0, 2, 1)
+                usit_resized = F.normalize(usit_resized, dim=-1)
+                repa_tokens = F.normalize(repa_tokens, dim=-1)
+                result = -((usit_resized * repa_tokens).sum(dim=-1)).mean()
+            else:
+                repa_tokens = F.normalize(repa_tokens, dim=-1)
+                result = -((proj_tokens * repa_tokens).sum(dim=-1)).mean()
+        return result
     
     def format_embeddings(self, embeds):
         pass
@@ -95,7 +130,8 @@ class PixelDITModel(Model):
 
         caption_tokens = self.tokenizer(captions, max_length=300, padding="max_length", truncation=True, return_tensors="pt").to(self.accelerator.device)
         caption_embs = self.text_encoder(caption_tokens.input_ids, caption_tokens.attention_mask)[0][:, None][:, :, [0] + list(range(-300 + 1, 0))]
-        return caption_embs.squeeze(0).to(device=self.accelerator.device)
+        emb_masks = caption_tokens.attention_mask[:, [0] + list(range(-300 + 1, 0))]
+        return (caption_embs.squeeze(0).to(device=self.accelerator.device), emb_masks.squeeze(0).to(device=self.accelerator.device))
     
     def enable_efficient_attention(self):
         pass
@@ -109,7 +145,7 @@ class PixelDITModel(Model):
 
         idx = 0
         for prompt in prompts:
-            caption_embs = self.extract_embeddings(prompt)
+            caption_embs, mask = self.extract_embeddings(prompt)
             z = torch.randn(
                 1,
                 3,
@@ -149,8 +185,18 @@ class PixelDITModel(Model):
             )
             idx = idx + 1
     
+    def save_model(self):
+        to_save = self.accelerator.unwrap_model(self.model)
+        if isinstance(to_save, PeftModel):
+            super().save_model()
+        else: 
+            torch.save(to_save.state_dict(), f'models/{self.global_step}.pth')
+
     def optimize(self, ratio, latents, embeddings):
-        caption_embs = torch.stack(embeddings)
+        caption_embs = [embeddings[i] for i in range(0, len(embeddings), 2)]
+        mask = [embeddings[i] for i in range(1, len(embeddings), 2)]
+        caption_embs = torch.stack(caption_embs)
+        mask = torch.stack(mask)
         latents = latents.to(device=self.accelerator.device, dtype=torch.bfloat16)
         batch_size = latents.shape[0]
 
@@ -177,7 +223,7 @@ class PixelDITModel(Model):
         noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
 
         # Keep everything in bfloat16
-        noise_pred = checkpoint(self.model, noisy_model_input, timesteps, caption_embs, use_reentrant=False)['x']
+        noise_pred = checkpoint(self.model, noisy_model_input, timesteps, caption_embs, mask=mask, use_reentrant=False)['x']
         target = noise - latents
         
         # Flow matching MSE loss
