@@ -28,6 +28,7 @@ from common.trainer import Model
 from common.features_extractor import FeaturesExtractor
 from diffusion.model.builder import build_model, get_tokenizer_and_text_encoder
 from diffusion.utils.config import model_init_config
+import numpy as np
 from PixelDiT.t2i.inference import PixelDiTInference
 import pyrallis
 from huggingface_hub import hf_hub_download
@@ -104,6 +105,7 @@ class PixelDITModel(Model):
         WIDTH = 1024
         CFG_SCALE = 4.0
         prompts = self.params.validation_prompts
+        generator = torch.Generator(self.accelerator.device).manual_seed(42)
 
         idx = 0
         for prompt in prompts:
@@ -114,6 +116,7 @@ class PixelDITModel(Model):
                 HEIGHT,
                 WIDTH,
                 device=self.accelerator.device,
+                generator=generator
             )
             self.inference_scheduler.set_timesteps(20)
             x = z
@@ -154,8 +157,9 @@ class PixelDITModel(Model):
         loss_fn = torch.nn.MSELoss()
         noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=torch.bfloat16)
 
-        u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=1.29)
-        indices = (u * self.scheduler.config.num_train_timesteps).long()
+        u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=None)
+        u = u.to(self.accelerator.device)  # Move to device
+        indices = (u * self.scheduler.config.num_train_timesteps).long().cpu()  # Move indices to CPU for indexing
         timesteps = self.scheduler.timesteps[indices].to(self.accelerator.device)
 
         def get_sigmas(timesteps, n_dim=4, dtype=torch.float32):
@@ -175,8 +179,10 @@ class PixelDITModel(Model):
         # Keep everything in bfloat16
         noise_pred = checkpoint(self.model, noisy_model_input, timesteps, caption_embs, use_reentrant=False)['x']
         target = noise - latents
+        
+        # Flow matching MSE loss
         loss = loss_fn(noise_pred.float(), target.float())
-        return loss  # Already in bfloat16 since inputs were bfloat16
+        return loss
         
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
