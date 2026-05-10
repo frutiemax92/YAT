@@ -16,8 +16,8 @@ try:
 except Exception as e:
     print(f"Warning: Could not import PixDiTTrainer: {e}")
 
-from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_1024_BIN
-from diffusers import DPMSolverMultistepScheduler
+from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_1024_BIN, ASPECT_RATIO_512_BIN
+from diffusers import DPMSolverMultistepScheduler, FlowMatchEulerDiscreteScheduler
 from diffusers.training_utils import compute_density_for_timestep_sampling
 import torch
 import tqdm
@@ -28,6 +28,7 @@ from common.trainer import Model
 from common.features_extractor import FeaturesExtractor
 from diffusion.model.builder import build_model, get_tokenizer_and_text_encoder
 from diffusion.utils.config import model_init_config
+from diffusion.data.datasets import ASPECT_RATIO_1024, ASPECT_RATIO_512
 import numpy as np
 from PixelDiT.t2i.inference import PixelDiTInference
 import pyrallis
@@ -55,16 +56,13 @@ class PixelDITModel(Model):
         if "pos_embed" in state_dict["state_dict"]:
             del state_dict["state_dict"]["pos_embed"]
 
-        print(self.model)
         self.model.load_state_dict(state_dict["state_dict"], strict=False)
-        self._repa_projector = self.model._repa_projector
+        self.repa_projector = self.model._repa_projector
         
-        self.scheduler = DPMSolverMultistepScheduler(
+        self.scheduler = FlowMatchEulerDiscreteScheduler(
             num_train_timesteps=1000,
-            prediction_type="flow_prediction",
-            algorithm_type="dpmsolver++",
-            use_flow_sigmas=True,  # Enable flow matching mode
-            flow_shift=config.scheduler.flow_shift,  # Use flow_shift from config
+            time_shift_type='linear',
+            shift=config.scheduler.flow_shift,  # Use flow_shift from config
         )
         self.inference_scheduler = DPMSolverMultistepScheduler(
             num_train_timesteps=1000,
@@ -92,31 +90,71 @@ class PixelDITModel(Model):
     def repa_loss(self, batch):
         repa_tokens = batch.repa_features
         import torch.nn.functional as F
-
-        proj_tokens = self._repa_projector(self.model.last_repa_tokens)  # [B, L, 768]
+        import gc
+        
+        model = self.accelerator.unwrap_model(self.model)
+        proj_tokens = self.repa_projector(model.core.last_repa_tokens)  # [B, L, 768]
         proj_tokens = F.normalize(proj_tokens, dim=-1)
         B, Td, C = repa_tokens.shape
         Bu, Tu, Cu = proj_tokens.shape
-        h_u = int(Tu ** 0.5)
-        h_d = int(Td ** 0.5)
-        if h_u * h_u == Tu and h_d * h_d == Td:
-            if Td > Tu:
-                dino_2d = repa_tokens.permute(0, 2, 1).reshape(B, C, h_d, h_d)
-                dino_resized = F.interpolate(dino_2d, size=(h_u, h_u), mode="bilinear", align_corners=False)
-                dino_resized = dino_resized.flatten(2).permute(0, 2, 1)
-                dino_resized = F.normalize(dino_resized, dim=-1)
-                result = -((proj_tokens * dino_resized).sum(dim=-1)).mean()
-            elif Td < Tu:
-                usit_2d = proj_tokens.permute(0, 2, 1).reshape(Bu, Cu, h_u, h_u)
-                usit_resized = F.interpolate(usit_2d, size=(h_d, h_d), mode="bilinear", align_corners=False)
-                usit_resized = usit_resized.flatten(2).permute(0, 2, 1)
-                usit_resized = F.normalize(usit_resized, dim=-1)
-                repa_tokens = F.normalize(repa_tokens, dim=-1)
-                result = -((usit_resized * repa_tokens).sum(dim=-1)).mean()
-            else:
-                repa_tokens = F.normalize(repa_tokens, dim=-1)
-                result = -((proj_tokens * repa_tokens).sum(dim=-1)).mean()
-        return result
+        
+        # Get spatial dimensions from batch if available, otherwise try to infer
+        if hasattr(batch, 'repa_spatial_dims') and batch.repa_spatial_dims is not None:
+            h_d, w_d = batch.repa_spatial_dims
+        else:
+            h_d = int(Td ** 0.5)
+            w_d = h_d if (h_d * h_d == Td) else Td
+        
+        if hasattr(batch, 'proj_spatial_dims') and batch.proj_spatial_dims is not None:
+            h_u, w_u = batch.proj_spatial_dims
+        else:
+            h_u = int(Tu ** 0.5)
+            w_u = h_u if (h_u * h_u == Tu) else Tu
+        
+        # Only process if we have valid spatial dimensions
+        if h_d * w_d == Td and h_u * w_u == Tu:
+            try:
+                # Normalize REPA tokens
+                repa_norm = F.normalize(repa_tokens, dim=-1)
+                
+                # Use no_grad for DINO tokens - they don't need backprop
+                with torch.no_grad():
+                    dino_2d = repa_norm.permute(0, 2, 1).reshape(B, C, h_d, w_d)
+                
+                usit_2d = proj_tokens.permute(0, 2, 1).reshape(Bu, Cu, h_u, w_u)
+                
+                if (h_d, w_d) != (h_u, w_u):
+                    # Interpolate to match spatial dimensions
+                    if Td > Tu:
+                        dino_resized = F.interpolate(dino_2d, size=(h_u, w_u), mode="bilinear", align_corners=False)
+                        dino_resized = dino_resized.flatten(2).permute(0, 2, 1)
+                        # Normalize after interpolation
+                        dino_resized = F.normalize(dino_resized, dim=-1)
+                        # Cosine similarity between normalized vectors: range [-1, 1]
+                        similarity = (proj_tokens * dino_resized.detach()).sum(dim=-1)
+                        # Use 1 - similarity for loss: range [0, 2], minimum when aligned
+                        result = (1.0 - similarity).mean()
+                    else:  # Td < Tu
+                        usit_resized = F.interpolate(usit_2d, size=(h_d, w_d), mode="bilinear", align_corners=False)
+                        usit_resized = usit_resized.flatten(2).permute(0, 2, 1)
+                        # Normalize after interpolation
+                        usit_resized = F.normalize(usit_resized, dim=-1)
+                        similarity = (usit_resized * repa_norm.detach()).sum(dim=-1)
+                        result = (1.0 - similarity).mean()
+                else:
+                    similarity = (proj_tokens * repa_norm.detach()).sum(dim=-1)
+                    result = (1.0 - similarity).mean()
+                
+                # Cleanup intermediate tensors to save VRAM
+                del dino_2d, usit_2d, repa_norm
+                gc.collect()
+                
+                return result
+            except RuntimeError as e:
+                # If reshape fails, return None and skip repa loss
+                print(f"Warning: REPA loss computation failed: {e}")
+                return None
+        return None
     
     def format_embeddings(self, embeds):
         pass

@@ -35,6 +35,8 @@ class Batch:
         self.vae_features = None
         self.repa_features = None
         self.ratio = None
+        self.repa_spatial_dims = None  # (height, width) of repa token grid
+        self.proj_spatial_dims = None  # (height, width) of proj token grid
 
 
 class BucketSampler:
@@ -126,9 +128,12 @@ class BucketSampler:
         os.makedirs(self.local_temp_dir, exist_ok=True)
 
         if use_repa:
-            self.repa_processor = AutoImageProcessor.from_pretrained('facebook/dinov2-base')
-            self.repa_model = AutoModel.from_pretrained('facebook/dinov2-base').to(torch.bfloat16)
-            self.repa_model.to(self.accelerator.device)
+            import timm
+            self.dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14').to(self.accelerator.device)
+            #self.dino = timm.create_model('vit_base_patch14_dinov2.lvd142m', pretrained=True).to(self.accelerator.device)
+            self.dino.eval()
+            for p in self.dino.parameters():
+                p.requires_grad = False
 
     def pt_decoder(self, key, value):
         if key.endswith("pt"):
@@ -250,6 +255,16 @@ class BucketSampler:
                             batch.vae_features = vae_features
                             if self.use_repa:
                                 batch.repa_features = repa_features
+                                # REPA tokens from DINO on 224x224 are always 16x16 (256 tokens)
+                                batch.repa_spatial_dims = (16, 16)
+                                # Proj token spatial dims will be set by the model based on image size
+                                # For now store aspect ratio dimensions
+                                aspect_ratio = self.model.aspect_ratios[str(ratio)]
+                                target_height = int(aspect_ratio[0])
+                                target_width = int(aspect_ratio[1])
+                                # Assuming 32x32 patch size, so divide by 32
+                                patch_size = getattr(self.model, 'patch_size', 16)
+                                batch.proj_spatial_dims = (target_height // patch_size, target_width // patch_size)
                             
                             yield batch
                             self.buckets[closest_ratio].clear()
@@ -333,21 +348,15 @@ class BucketSamplerExtractFeatures(BucketSampler):
 
         transform = self.get_transform(ratio)
         with torch.no_grad():
-            if low_vram:
-                self.model.pipe.text_encoder.cpu()
-                torch.cuda.empty_cache()
-            flush()
+            imgs = []
             for i in range(0, len(batch[0]), self.vae_max_batch_size):
                 end_index = min(len(batch[0]), i+self.vae_max_batch_size)
                 images = batch[0][i:end_index]
                 images = torch.stack([transform(x) for x in images]).to(dtype=torch.bfloat16, device=self.accelerator.device)
+                imgs.extend(images)
                 features = self.model.extract_latents(images)
                 vae_features.extend(features)
             
-            if low_vram:
-                self.model.pipe.vae.cpu()
-                torch.cuda.empty_cache()
-            flush()
             for i in range(0, len(batch[1]), self.text_encoder_max_batch_size):
                 end_index = min(len(batch[1]), i+self.text_encoder_max_batch_size)
                 captions = batch[1][i:i+self.text_encoder_max_batch_size]
@@ -355,15 +364,30 @@ class BucketSamplerExtractFeatures(BucketSampler):
                 embeddings.extend(embeds)
         
             # check if we need to do repa
+            # copied from pixeldit
             if self.use_repa:
-                images = batch[0]
-                inputs = self.repa_processor(images=images, return_tensors="pt")
-                inputs = inputs['pixel_values'].to(self.accelerator.device, dtype=torch.bfloat16)
-                outputs = self.repa_model(inputs)
+                from torchvision.transforms.functional import pil_to_tensor
+                #images = torch.stack([pil_to_tensor(img) for img in images])
 
-                repa_features = outputs.pooler_output
+                import torch.nn.functional as F
+                imgs = torch.stack(imgs)
+                imgs01 = (imgs.float() + 1.0) / 2.0
+                imgs224 = F.interpolate(imgs01, size=(224, 224), mode="bicubic", align_corners=False)
 
-        return torch.stack(vae_features), embeddings, repa_features
+                from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+                mean = torch.as_tensor(IMAGENET_DEFAULT_MEAN, device=imgs224.device, dtype=imgs224.dtype).view(1, 3, 1, 1)
+                std = torch.as_tensor(IMAGENET_DEFAULT_STD, device=imgs224.device, dtype=imgs224.dtype).view(1, 3, 1, 1)
+                imgs224 = (imgs224 - mean) / std
+                feats = self.dino.forward_features(imgs224)
+                if isinstance(feats, dict):
+                    if "x_norm_patchtokens" in feats:
+                        repa_tokens = feats["x_norm_patchtokens"]  # [B, 256, 768]
+                    elif "tokens" in feats:
+                        repa_tokens = feats["tokens"][:, 1:]
+                elif isinstance(feats, torch.Tensor):
+                    repa_tokens = feats[:, 1:]
+
+        return torch.stack(vae_features), embeddings, repa_tokens
     
     def get_transform(self, bucket):
         aspect_ratio = self.model.aspect_ratios[str(bucket)]
