@@ -365,6 +365,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
         
             # check if we need to do repa
             # copied from pixeldit
+            repa_tokens = None
             if self.use_repa:
                 from torchvision.transforms.functional import pil_to_tensor
                 #images = torch.stack([pil_to_tensor(img) for img in images])
