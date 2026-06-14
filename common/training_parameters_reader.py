@@ -51,6 +51,9 @@ class TrainingParameters:
 
         # timesteps, this is used for a refiner model
         self.timesteps = []
+
+        # aspect ratios override
+        self.aspect_ratios = None
     
     def read_yaml(self, file):
         with open(file) as f:
@@ -204,6 +207,9 @@ class TrainingParameters:
         self.bucket_repeat = 1
         if 'bucket_repeat' in yaml_root.keys():
             self.bucket_repeat = int(yaml_root['bucket_repeat'])
+
+        # aspect ratios override
+        self.aspect_ratios = int(yaml_root['aspect_ratio']) if 'aspect_ratio' in yaml_root.keys() else None
 
         # for training simple dreambooth loras
         self.dreambooth_dataset_folder = None

@@ -20,8 +20,7 @@ from accelerate.utils import InitProcessGroupKwargs, DistributedDataParallelKwar
 from datetime import timedelta
 from peft.helpers import rescale_adapter_scale
 from accelerate.utils import DeepSpeedPlugin
-
-
+from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_1024_BIN, ASPECT_RATIO_512_BIN
 
 class Model:
     def __init__(self, params : TrainingParameters):
@@ -37,10 +36,13 @@ class Model:
             ],
         )
 
-        if hasattr(self.accelerator.state, 'deepseed'):
+        if self.accelerator.state.deepspeed_plugin is not None:
             self.accelerator.state.deepspeed_plugin.deepspeed_config[
                 "train_micro_batch_size_per_gpu"
             ] = params.batch_size
+            self.accelerator.state.deepspeed_plugin.deepspeed_config["reduce_bucket_size"] = 50000000,
+            self.accelerator.state.deepspeed_plugin.deepspeed_config["allgather_bucket_size"] =  50000000
+            print('using deepspeed')
         self.params = params
 
         self.process_index = self.accelerator.process_index
@@ -122,6 +124,11 @@ class Model:
         self.pipe.enable_xformers_memory_efficient_attention()
         
     def initialize(self):
+        # override aspect ratios
+        if self.params.aspect_ratios == 512:
+            self.aspect_ratios = ASPECT_RATIO_512_BIN
+        elif self.params.aspect_ratios == 1024:
+            self.aspect_ratios = ASPECT_RATIO_1024_BIN
         # use flash attention
         # sana's transformer cannot use this
         torch.backends.cuda.enable_flash_sdp(True)
@@ -261,6 +268,7 @@ class Model:
             self.ema_model.to(self.accelerator.device)
 
         # extract empty embedding
+        self.accelerator.wait_for_everyone()
         with torch.no_grad():
             self.empty_embeddings = self.extract_embeddings([''])
         
