@@ -324,7 +324,7 @@ class Model:
                     
 
                     if self.params.use_repa:
-                        loss = loss + self.config.repa_lambda * self.repa_loss
+                        loss = loss + self.params.repa_lambda * self.repa_loss(batch)
 
                     avg_loss = avg_loss + loss
                     self.accelerator.backward(loss)
