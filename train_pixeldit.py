@@ -48,15 +48,15 @@ class PixelDITModel(Model):
         model_kwargs = model_init_config(config, latent_size=1024)
         self.model = build_model(config.model.model, use_fp32_attention=config.model.get("fp32_attention", False), **model_kwargs).to(self.accelerator.device, dtype=torch.bfloat16)
 
-        repo = 'nvidia/PixelDiT-1300M-1024px'
-        if params.pretrained_model_path != None:
-            repo = params.pretrained_model_path
-        checkpoint_path = hf_hub_download(repo_id=repo, filename='pixeldit_t2i_v1.pth', local_dir='./checkpoints')
+        repo = 'frutiemax/twisted-reality-pixeldit-512px-v1'
+        #if params.pretrained_model_path != None:
+            #repo = params.pretrained_model_path
+        checkpoint_path = hf_hub_download(repo_id=repo, filename='model.pth', local_dir='./checkpoints')
         state_dict = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
-        if "pos_embed" in state_dict["state_dict"]:
+        if "pos_embed" in state_dict:
             del state_dict["state_dict"]["pos_embed"]
 
-        self.model.load_state_dict(state_dict["state_dict"], strict=False)
+        self.model.load_state_dict(state_dict, strict=False)
         self.repa_projector = self.model._repa_projector
         
         self.scheduler = FlowMatchEulerDiscreteScheduler(
@@ -204,7 +204,7 @@ class PixelDITModel(Model):
                 
                 # Apply classifier-free guidance
                 #model_output_uncond = model(x, t, y=null_y, **model_kwargs)
-                model_output_uncond = self.model(x, t, y=self.empty_embeddings)
+                model_output_uncond = self.model(x, t.to(self.accelerator.device), y=self.empty_embeddings)
                 if isinstance(model_output_uncond, dict):
                     model_output_uncond = model_output_uncond.get('sample', list(model_output_uncond.values())[0])
                 model_output = model_output_uncond + CFG_SCALE * (model_output - model_output_uncond)
