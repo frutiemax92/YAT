@@ -347,13 +347,13 @@ class Model:
                     mean_loss = avg_loss
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
 
-                    if self.logger != None:
+                    if self.logger != None and self.accelerator.is_main_process:
                         try:
                             self.logger.add_scalar('train/loss', mean_loss.item(), self.global_step)
                             if self.lr_scheduler != None:
                                 last_lr = self.lr_scheduler.get_last_lr()
                                 self.logger.add_scalar('train/lr', last_lr[0], self.global_step)
-                        except OSError as e:
+                        except Exception as e:
                             print(f"[Warning] TensorBoard logging failed: {e}")
 
                     if self.global_step % params.num_steps_per_validation == 0:
