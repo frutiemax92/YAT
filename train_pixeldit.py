@@ -46,7 +46,8 @@ class PixelDITModel(Model):
         self.tokenizer, self.text_encoder = get_tokenizer_and_text_encoder(name=config.text_encoder.text_encoder_name, device=self.accelerator.device)
 
         model_kwargs = model_init_config(config, latent_size=1024)
-        self.model = build_model(config.model.model, use_fp32_attention=config.model.get("fp32_attention", False), **model_kwargs).to(self.accelerator.device, dtype=torch.bfloat16)
+        model_kwargs['extra']['repa_encoder_index'] = 12  # Enable REPA
+        self.model = build_model('PixDiTTrainer', use_fp32_attention=config.model.get("fp32_attention", False), **model_kwargs).to(self.accelerator.device, dtype=torch.bfloat16)
 
         repo = 'frutiemax/twisted-reality-pixeldit-512px-v1'
         #if params.pretrained_model_path != None:
@@ -54,10 +55,12 @@ class PixelDITModel(Model):
         checkpoint_path = hf_hub_download(repo_id=repo, filename='model.pth', local_dir='./checkpoints')
         state_dict = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
         if "pos_embed" in state_dict:
-            del state_dict["state_dict"]["pos_embed"]
+            del state_dict["pos_embed"]
 
         self.model.load_state_dict(state_dict, strict=False)
-        self.repa_projector = self.model._repa_projector
+        print(f"Model: {type(self.model).__name__}")
+        print(f"REPA encoder index: {self.model.core.repa_encoder_index}")
+        print(f"Patch depth: {self.model.core.patch_depth}")
         
         self.scheduler = FlowMatchEulerDiscreteScheduler(
             num_train_timesteps=1000,
@@ -73,6 +76,7 @@ class PixelDITModel(Model):
         )
         self.text_encoder.train(False)
         self.aspect_ratios = ASPECT_RATIO_1024_BIN
+        self.repa_loss = 0.0
     
     def initialize(self):
         super().initialize()
@@ -86,75 +90,6 @@ class PixelDITModel(Model):
         #vae.cpu()
         #text_encoder.cpu()
         self.empty_embeddings, _ = self.empty_embeddings
-
-    def repa_loss(self, batch):
-        repa_tokens = batch.repa_features
-        import torch.nn.functional as F
-        import gc
-        
-        model = self.accelerator.unwrap_model(self.model)
-        proj_tokens = self.repa_projector(model.core.last_repa_tokens)  # [B, L, 768]
-        proj_tokens = F.normalize(proj_tokens, dim=-1)
-        B, Td, C = repa_tokens.shape
-        Bu, Tu, Cu = proj_tokens.shape
-        
-        # Get spatial dimensions from batch if available, otherwise try to infer
-        if hasattr(batch, 'repa_spatial_dims') and batch.repa_spatial_dims is not None:
-            h_d, w_d = batch.repa_spatial_dims
-        else:
-            h_d = int(Td ** 0.5)
-            w_d = h_d if (h_d * h_d == Td) else Td
-        
-        if hasattr(batch, 'proj_spatial_dims') and batch.proj_spatial_dims is not None:
-            h_u, w_u = batch.proj_spatial_dims
-        else:
-            h_u = int(Tu ** 0.5)
-            w_u = h_u if (h_u * h_u == Tu) else Tu
-        
-        # Only process if we have valid spatial dimensions
-        if h_d * w_d == Td and h_u * w_u == Tu:
-            try:
-                # Normalize REPA tokens
-                repa_norm = F.normalize(repa_tokens, dim=-1)
-                
-                # Use no_grad for DINO tokens - they don't need backprop
-                with torch.no_grad():
-                    dino_2d = repa_norm.permute(0, 2, 1).reshape(B, C, h_d, w_d)
-                
-                usit_2d = proj_tokens.permute(0, 2, 1).reshape(Bu, Cu, h_u, w_u)
-                
-                if (h_d, w_d) != (h_u, w_u):
-                    # Interpolate to match spatial dimensions
-                    if Td > Tu:
-                        dino_resized = F.interpolate(dino_2d, size=(h_u, w_u), mode="bilinear", align_corners=False)
-                        dino_resized = dino_resized.flatten(2).permute(0, 2, 1)
-                        # Normalize after interpolation
-                        dino_resized = F.normalize(dino_resized, dim=-1)
-                        # Cosine similarity between normalized vectors: range [-1, 1]
-                        similarity = (proj_tokens * dino_resized.detach()).sum(dim=-1)
-                        # Use 1 - similarity for loss: range [0, 2], minimum when aligned
-                        result = (1.0 - similarity).mean()
-                    else:  # Td < Tu
-                        usit_resized = F.interpolate(usit_2d, size=(h_d, w_d), mode="bilinear", align_corners=False)
-                        usit_resized = usit_resized.flatten(2).permute(0, 2, 1)
-                        # Normalize after interpolation
-                        usit_resized = F.normalize(usit_resized, dim=-1)
-                        similarity = (usit_resized * repa_norm.detach()).sum(dim=-1)
-                        result = (1.0 - similarity).mean()
-                else:
-                    similarity = (proj_tokens * repa_norm.detach()).sum(dim=-1)
-                    result = (1.0 - similarity).mean()
-                
-                # Cleanup intermediate tensors to save VRAM
-                del dino_2d, usit_2d, repa_norm
-                gc.collect()
-                
-                return result
-            except RuntimeError as e:
-                # If reshape fails, return None and skip repa loss
-                print(f"Warning: REPA loss computation failed: {e}")
-                return None
-        return None
     
     def format_embeddings(self, embeds):
         pass
@@ -230,7 +165,7 @@ class PixelDITModel(Model):
         else: 
             torch.save(to_save.state_dict(), f'models/{self.global_step}.pth')
 
-    def optimize(self, ratio, latents, embeddings):
+    def optimize(self, ratio, latents, embeddings, repa_tokens):
         caption_embs = [embeddings[i] for i in range(0, len(embeddings), 2)]
         mask = [embeddings[i] for i in range(1, len(embeddings), 2)]
         caption_embs = torch.stack(caption_embs)
@@ -261,11 +196,23 @@ class PixelDITModel(Model):
         noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
 
         # Keep everything in bfloat16
-        noise_pred = checkpoint(self.model, noisy_model_input, timesteps, caption_embs, mask=mask, use_reentrant=False)['x']
+        output = checkpoint(self.model, noisy_model_input, timesteps, caption_embs, mask=mask, repa_tokens=repa_tokens, use_reentrant=False)
+        noise_pred = output['x']
+        repa_loss = output['repa_loss']
         target = noise - latents
         
         # Flow matching MSE loss
-        loss = loss_fn(noise_pred.float(), target.float())
+        main_loss = loss_fn(noise_pred.float(), target.float())
+        
+        # Combine with REPA loss if available
+        if repa_loss is not None:
+            repa_weight = getattr(self.params, 'repa_loss_weight', 0.1)
+            self.repa_loss = repa_loss.item() if torch.is_tensor(repa_loss) else repa_loss
+            loss = main_loss + repa_weight * repa_loss
+        else:
+            self.repa_loss = 0.0
+            loss = main_loss
+        
         return loss
         
 if __name__ == '__main__':
