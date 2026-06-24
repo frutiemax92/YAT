@@ -313,6 +313,7 @@ class Model:
                 ratio = batch.ratio
                 latents = batch.vae_features
                 embeddings = batch.embeddings
+                repa_features = batch.repa_features
                 with self.accelerator.accumulate(self.model):
                     # randomly train with the unconditional embedding
                     prob = random.random()
@@ -320,11 +321,11 @@ class Model:
                         # put the embeddings to the empty one
                         for idx in range(len(embeddings)):
                             embeddings[idx] = self.empty_embeddings[0]
-                    loss = self.optimize(ratio, latents, embeddings)
+                    loss = self.optimize(ratio, latents, embeddings, repa_features)
                     
 
-                    if self.params.use_repa:
-                        loss = loss + self.params.repa_lambda * self.repa_loss(batch)
+                    #if self.params.use_repa:
+                        #loss = loss + self.params.repa_lambda * self.repa_loss(batch)
 
                     avg_loss = avg_loss + loss
                     self.accelerator.backward(loss)

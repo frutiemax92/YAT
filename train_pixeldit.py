@@ -49,10 +49,11 @@ class PixelDITModel(Model):
         model_kwargs['extra']['repa_encoder_index'] = 12  # Enable REPA
         self.model = build_model('PixDiTTrainer', use_fp32_attention=config.model.get("fp32_attention", False), **model_kwargs).to(self.accelerator.device, dtype=torch.bfloat16)
 
-        repo = 'frutiemax/twisted-reality-pixeldit-512px-v1'
+        #repo = 'frutiemax/twisted-reality-pixeldit-512px-v1'
         #if params.pretrained_model_path != None:
             #repo = params.pretrained_model_path
-        checkpoint_path = hf_hub_download(repo_id=repo, filename='model.pth', local_dir='./checkpoints')
+        #checkpoint_path = hf_hub_download(repo_id=repo, filename='model.pth', local_dir='./checkpoints')
+        checkpoint_path = 'twisted-reality-pixeldit-1024px-v3a.pth'
         state_dict = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
         if "pos_embed" in state_dict:
             del state_dict["pos_embed"]
