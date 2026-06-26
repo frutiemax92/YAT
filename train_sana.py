@@ -149,7 +149,7 @@ class SanaModel(Model):
         self.pipe.text_encoder = text_encoder
         self.pipe.transformer = transformer
     
-    def optimize(self, ratio, latents, embeddings):
+    def optimize(self, ratio, latents, embeddings, repa_tokens):
         params = self.params
         batch_size = params.batch_size
 
