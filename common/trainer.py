@@ -343,9 +343,7 @@ class Model:
                         self.optimizer.zero_grad()
                 
                 if self.accelerator.sync_gradients:
-                    if self.params.dual_gpu == False:
-                        mean_loss = torch.mean(self.accelerator.gather(avg_loss))
-                    mean_loss = avg_loss
+                    mean_loss = self.accelerator.gather(avg_loss).mean()
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
 
                     if self.logger != None and self.accelerator.is_main_process:
