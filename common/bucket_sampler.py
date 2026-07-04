@@ -221,58 +221,55 @@ class BucketSampler:
 
             for elem in dataset:
                 self.process_element(elem)
-                cache_index = cache_index + 1
 
-                if cache_index >= self.cache_size:
-                    self.accelerator.wait_for_everyone()
-                    cache_index = 0
+                self.accelerator.wait_for_everyone()
 
-                    # consume all the accumulated samples in the buckets
-                    # this should be deterministic across all processes...
-                    for key in self.buckets.keys():
-                        num_samples = torch.tensor(len(self.buckets[key]), dtype=torch.int64, device=self.accelerator.device)
-                        num_samples = self.accelerator.gather(num_samples)
+                # consume all the accumulated samples in the buckets
+                # this should be deterministic across all processes...
+                for key in self.buckets.keys():
+                    num_samples = torch.tensor(len(self.buckets[key]), dtype=torch.int64, device=self.accelerator.device)
+                    num_samples = self.accelerator.gather(num_samples)
+                    
+                    is_ok = torch.min(num_samples) >= self.batch_size
+                    is_ok = bool(is_ok.item())
+                    
+                    #self.accelerator.wait_for_everyone()
+                    if is_ok:
+                        # consume batch_size samples for the current bucket
+                        closest_ratio = key
+                        batch = ([self.buckets[closest_ratio][i][0] for i in range(self.batch_size)],
+                                [self.buckets[closest_ratio][i][1] for i in range(self.batch_size)])
                         
-                        is_ok = torch.min(num_samples) >= self.batch_size
-                        is_ok = bool(is_ok.item())
+                        # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
+                        # as extracting features tends to use more VRAM than actually training the model
+                        # we freeze the vae and text encoder model
+                        ratio = self.get_ratio_from_key(closest_ratio)
+                        vae_features, embeddings, repa_features = self.extract_features(batch, ratio)
+
+                        batch = Batch()
+                        batch.ratio = ratio
+                        batch.embeddings = embeddings
+                        batch.vae_features = vae_features
+                        if self.use_repa:
+                            batch.repa_features = repa_features
+                            # REPA tokens from DINO on 224x224 are always 16x16 (256 tokens)
+                            batch.repa_spatial_dims = (16, 16)
+                            # Proj token spatial dims will be set by the model based on image size
+                            # For now store aspect ratio dimensions
+                            aspect_ratio = self.model.aspect_ratios[str(ratio)]
+                            target_height = int(aspect_ratio[0])
+                            target_width = int(aspect_ratio[1])
+                            # Assuming 32x32 patch size, so divide by 32
+                            patch_size = getattr(self.model, 'patch_size', 16)
+                            batch.proj_spatial_dims = (target_height // patch_size, target_width // patch_size)
                         
-                        #self.accelerator.wait_for_everyone()
-                        if is_ok:
-                            # consume batch_size samples for the current bucket
-                            closest_ratio = key
-                            batch = ([self.buckets[closest_ratio][i][0] for i in range(self.batch_size)],
-                                    [self.buckets[closest_ratio][i][1] for i in range(self.batch_size)])
-                            
-                            # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
-                            # as extracting features tends to use more VRAM than actually training the model
-                            # we freeze the vae and text encoder model
-                            ratio = self.get_ratio_from_key(closest_ratio)
-                            vae_features, embeddings, repa_features = self.extract_features(batch, ratio)
+                        yield batch
+                        self.buckets[closest_ratio].clear()
 
-                            batch = Batch()
-                            batch.ratio = ratio
-                            batch.embeddings = embeddings
-                            batch.vae_features = vae_features
-                            if self.use_repa:
-                                batch.repa_features = repa_features
-                                # REPA tokens from DINO on 224x224 are always 16x16 (256 tokens)
-                                batch.repa_spatial_dims = (16, 16)
-                                # Proj token spatial dims will be set by the model based on image size
-                                # For now store aspect ratio dimensions
-                                aspect_ratio = self.model.aspect_ratios[str(ratio)]
-                                target_height = int(aspect_ratio[0])
-                                target_width = int(aspect_ratio[1])
-                                # Assuming 32x32 patch size, so divide by 32
-                                patch_size = getattr(self.model, 'patch_size', 16)
-                                batch.proj_spatial_dims = (target_height // patch_size, target_width // patch_size)
-                            
-                            yield batch
-                            self.buckets[closest_ratio].clear()
-
-                            del batch
-                            del vae_features
-                            del embeddings
-                            gc.collect()
+                        del batch
+                        del vae_features
+                        del embeddings
+                        gc.collect()
                         
             self.remove_shard(to_remove, local_shard_path)
 
@@ -451,38 +448,46 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
         # this is a hack to reuse the existing code!
         def download_shard_worker(process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
             current_item = 0
+            local_files = 0
             while True:
-                if to_train.qsize() < 4:
-                    if current_item % 2 == 0:
-                        for r in range(self.dreambooth_num_repeats):
-                            to_train.put((False, self.dreambooth_dataset_folder))
-                    else:
-                        # we get the regularization images either from a local folder or a bucket on the cloud
-                        for r in range(self.dreambooth_num_regularisation_passes):
-                            if self.r2_bucket_name == None:
-                                to_train.put((True, self.dreambooth_regularization_folder))
-                            else:
-                                current_shard_index = self.get_next_shard_index()
-                                dataset_url = get_secured_urls(self.r2_access_key,
-                                            self.r2_secret_key,
-                                            self.r2_endpoint,
-                                            self.r2_bucket_name,
-                                            [self.features_path + '/' + self.shards[current_shard_index]]
-                                            )[0]
-                                local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
-                                try:
-                                    download_tar(dataset_url, local_shard_path)
-                                except:
-                                    current_shard_index = self.get_next_shard_index()
-                                    continue
-                                to_train.put((True, local_shard_path))
+                if current_item % 2 == 0:
+                    for r in range(self.dreambooth_num_repeats):
+                        to_train.put((False, self.dreambooth_dataset_folder))
                     current_item = current_item + 1
-                try:
-                    reg_shard, local_shard_path = to_remove.get(timeout=10)
-                    if reg_shard:
-                        self.cleanup_shard(local_shard_path)
-                except:
-                    pass
+                    continue
+                elif local_files < 10:
+                    # we get the regularization images either from a local folder or a bucket on the cloud
+                    for r in range(self.dreambooth_num_regularisation_passes):
+                        if self.r2_bucket_name == None:
+                            to_train.put((True, self.dreambooth_regularization_folder))
+                        else:
+                            current_shard_index = self.get_next_shard_index()
+                            dataset_url = get_secured_urls(self.r2_access_key,
+                                        self.r2_secret_key,
+                                        self.r2_endpoint,
+                                        self.r2_bucket_name,
+                                        [self.features_path + '/' + self.shards[current_shard_index]]
+                                        )[0]
+                            local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
+                            try:
+                                download_tar(dataset_url, local_shard_path)
+                            except:
+                                current_shard_index = self.get_next_shard_index()
+                                continue
+                            to_train.put((True, local_shard_path))
+                            local_files = local_files + 1
+                    current_item = current_item + 1
+                else:
+                    try:
+                        elem = to_remove.get(timeout=10)
+                        if elem:
+                            reg_shard, local_shard_path = elem
+                            if reg_shard:
+                                self.cleanup_shard(local_shard_path)
+                                local_files = local_files - 1
+                    except:
+                        pass
+
         self.download_shard_proc = download_shard_worker
 
     def get_invalid_bucket(self):
