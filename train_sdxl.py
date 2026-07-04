@@ -118,7 +118,7 @@ class SDXLModel(Model):
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image[0]), self.global_step)
             idx = idx + 1
 
-    def optimize(self, ratio, latents, embeddings):
+    def optimize(self, ratio, latents, embeddings, repa_features):
         params = self.params
         batch_size = params.batch_size
         self.model.to(self.accelerator.device)
