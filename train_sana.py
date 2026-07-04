@@ -11,17 +11,30 @@ from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
 from common.trainer import Model
 from common.features_extractor import FeaturesExtractor
+from diffusers.quantizers import PipelineQuantizationConfig
 
 class SanaModel(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
         
         if params.pretrained_model_path != None:
-            transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path, 
-                                                                 quantization_config=self.quantization_config, 
+            transformer = SanaTransformer2DModel.from_pretrained(params.pretrained_model_path,  
                                                                  torch_dtype=torch.bfloat16,
                                                                  device_map=f"cuda:{self.accelerator.process_index}")
-            self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path, transformer=transformer, torch_dtype=torch.bfloat16) 
+            
+            if params.use_adamw_8bit:
+                pipeline_quant_config = PipelineQuantizationConfig(
+                    quant_backend="bitsandbytes_4bit",
+                    quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": torch.bfloat16},
+                    components_to_quantize=["transformer", "text_encoder"],
+                )
+            else:
+                pipeline_quant_config = None
+            self.pipe = SanaPipeline.from_pretrained(
+                params.pretrained_pipe_path, 
+                quantization_config=pipeline_quant_config, 
+                transformer=transformer, 
+                torch_dtype=torch.bfloat16) 
         else:
             self.pipe = SanaPipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16) 
         
@@ -43,7 +56,7 @@ class SanaModel(Model):
             # enable vae tiling for this resolution
             self.pipe.vae.enable_tiling(tile_sample_min_width=1024, tile_sample_min_height=1024)
 
-        self.pipe.text_encoder.to(torch.bfloat16)
+        #self.pipe.text_encoder.to(torch.bfloat16)
         self.pipe.vae.to(torch.bfloat16)
 
         self.model = self.pipe.transformer
@@ -57,9 +70,7 @@ class SanaModel(Model):
         vae = self.pipe.vae
         text_encoder = self.pipe.text_encoder
         
-        transformer.to(self.accelerator.device)
-        vae.cpu()
-        text_encoder.cpu()
+        #transformer.to(self.accelerator.device)
     
     def format_embeddings(self, embeds):
         pass
@@ -72,7 +83,7 @@ class SanaModel(Model):
 
     def extract_embeddings(self, captions):
         # move text_encoder to cuda if not already done
-        self.pipe.text_encoder.to(device=self.accelerator.device)
+        #self.pipe.text_encoder.to(device=self.accelerator.device)
         prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
         self.pipe.encode_prompt(captions,
                                 do_classifier_free_guidance=False,
