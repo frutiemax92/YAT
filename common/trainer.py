@@ -266,11 +266,6 @@ class Model:
         if self.params.use_ema:
             self.ema_model = EMAModel(self.model.parameters(), decay=0.999)
             self.ema_model.to(self.accelerator.device)
-
-        # extract empty embedding
-        self.accelerator.wait_for_everyone()
-        with torch.no_grad():
-            self.empty_embeddings = self.extract_embeddings([''])
         
         # check if we have timesteps, then apply a step callback
         # currently, we only support peft models at inference
@@ -288,7 +283,7 @@ class Model:
     def validate(self):
         raise NotImplemented
 
-    def optimize(self, latents, embeddings):
+    def optimize(self, ratio, latents, embeddings, repa_tokens, generator):
         raise NotImplemented
 
     def finalize(self):
@@ -307,6 +302,11 @@ class Model:
         progress_bar = tqdm.tqdm(total=params.steps, desc='Num Steps')
         avg_loss = torch.tensor(0, device=self.accelerator.device)
 
+        # extract empty embedding
+        self.accelerator.wait_for_everyone()
+        with torch.no_grad():
+            self.empty_embeddings = self.extract_embeddings([''])
+
         while self.global_step < self.params.steps:
             # then go through the cache items
             for batch in self.sampler:
@@ -321,7 +321,20 @@ class Model:
                         # put the embeddings to the empty one
                         for idx in range(len(embeddings)):
                             embeddings[idx] = self.empty_embeddings[0]
-                    loss = self.optimize(ratio, latents, embeddings, repa_features)
+
+                    generator = torch.Generator()
+                    if params.exploration_steps != None:
+                        with torch.no_grad():
+                            states = []
+                            losses = []
+                            for step in range(params.exploration_steps):
+                                states.append(generator.get_state())
+                                loss = self.optimize(ratio, latents, embeddings, repa_features, generator)
+                                losses.append(loss)
+
+                        min_loss_idx = torch.argmin(torch.stack(losses))
+                        generator.set_state(states[min_loss_idx])
+                    loss = self.optimize(ratio, latents, embeddings, repa_features, generator)
                     
 
                     #if self.params.use_repa:

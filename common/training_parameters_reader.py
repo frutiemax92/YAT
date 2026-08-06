@@ -54,6 +54,9 @@ class TrainingParameters:
 
         # aspect ratios override
         self.aspect_ratios = None
+
+        # from the paper explorative modeling: unlocking a third pretraining axis and end-to-end generation
+        self.exploration_steps = None
     
     def read_yaml(self, file):
         with open(file) as f:
@@ -219,6 +222,10 @@ class TrainingParameters:
         self.dreambooth_instance = yaml_root['dreambooth_instance'] if 'dreambooth_instance' in yaml_root.keys() else None
         self.dreambooth_class = yaml_root['dreambooth_class'] if 'dreambooth_class' in yaml_root.keys() else None
         self.dreambooth_regularization_folder = yaml_root['dreambooth_regularization_folder'] if 'dreambooth_regularization_folder' in yaml_root.keys() else None
+
+        # exploration steps
+        if 'exploration_steps' in yaml_root.keys():
+            self.exploration_steps = int(yaml_root['exploration_steps'])
 
 if __name__ == '__main__':
     params = TrainingParameters()

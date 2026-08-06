@@ -83,7 +83,7 @@ class SanaModel(Model):
 
     def extract_embeddings(self, captions):
         # move text_encoder to cuda if not already done
-        #self.pipe.text_encoder.to(device=self.accelerator.device)
+        self.pipe.text_encoder.to(device=self.accelerator.device)
         prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
         self.pipe.encode_prompt(captions,
                                 do_classifier_free_guidance=False,
@@ -160,7 +160,7 @@ class SanaModel(Model):
         self.pipe.text_encoder = text_encoder
         self.pipe.transformer = transformer
     
-    def optimize(self, ratio, latents, embeddings, repa_tokens):
+    def optimize(self, ratio, latents, embeddings, repa_tokens, generator: torch.Generator = None):
         params = self.params
         batch_size = params.batch_size
 
@@ -180,9 +180,15 @@ class SanaModel(Model):
         latents = latents.to(device=self.accelerator.device, dtype=torch.bfloat16)
 
         loss_fn = torch.nn.MSELoss()
-        noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=torch.bfloat16)
+        noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=torch.bfloat16, generator=generator)
 
-        u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=1.29)
+        u = compute_density_for_timestep_sampling(
+            'logit_normal',
+            batch_size,
+            logit_mean=0,
+            logit_std=1.0,
+            mode_scale=1.29,
+            generator=generator)
         indices = (u * self.scheduler.config.num_train_timesteps).long()
         timesteps = self.scheduler.timesteps[indices].to(self.accelerator.device)
 
