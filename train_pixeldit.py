@@ -166,7 +166,7 @@ class PixelDITModel(Model):
         else: 
             torch.save(to_save.state_dict(), f'models/{self.global_step}.pth')
 
-    def optimize(self, ratio, latents, embeddings, repa_tokens):
+    def optimize(self, ratio, latents, embeddings, repa_tokens, generator: torch.Generator = None):
         caption_embs = [embeddings[i] for i in range(0, len(embeddings), 2)]
         mask = [embeddings[i] for i in range(1, len(embeddings), 2)]
         caption_embs = torch.stack(caption_embs)
@@ -175,9 +175,9 @@ class PixelDITModel(Model):
         batch_size = latents.shape[0]
 
         loss_fn = torch.nn.MSELoss()
-        noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=torch.bfloat16)
+        noise = randn_tensor(latents.shape, device=self.accelerator.device, dtype=torch.bfloat16, generator=generator)
 
-        u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=None)
+        u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=None, generator=generator)
         u = u.to(self.accelerator.device)  # Move to device
         indices = (u * self.scheduler.config.num_train_timesteps).long().cpu()  # Move indices to CPU for indexing
         timesteps = self.scheduler.timesteps[indices].to(self.accelerator.device)
