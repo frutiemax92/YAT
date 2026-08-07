@@ -51,7 +51,12 @@ class PixelDITModel(Model):
 
         if params.pretrained_model_path != None:
             repo = params.pretrained_model_path
-        checkpoint_path = hf_hub_download(repo_id=repo, filename='model.pth', local_dir='./checkpoints')
+
+        if self.accelerator.is_main_process:
+            checkpoint_path = hf_hub_download(repo_id=repo, filename='model.pth', local_dir='./checkpoints')
+        else:
+            checkpoint_path = 'checkpoints/model.pth'
+        self.accelerator.wait_for_everyone()
         state_dict = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
         if "pos_embed" in state_dict:
             del state_dict["pos_embed"]
@@ -88,7 +93,7 @@ class PixelDITModel(Model):
         self.model.to(self.accelerator.device)
         #vae.cpu()
         #text_encoder.cpu()
-        self.empty_embeddings, _ = self.empty_embeddings
+        #self.empty_embeddings, _ = self.empty_embeddings
     
     def format_embeddings(self, embeds):
         pass
@@ -114,6 +119,9 @@ class PixelDITModel(Model):
         CFG_SCALE = 4.0
         prompts = self.params.validation_prompts
         generator = torch.Generator(self.accelerator.device).manual_seed(42)
+
+        if isinstance(self.empty_embeddings, tuple):
+            self.empty_embeddings, _ = self.empty_embeddings
 
         idx = 0
         for prompt in prompts:
