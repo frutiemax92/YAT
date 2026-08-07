@@ -26,6 +26,7 @@ class TrainingParameters:
         self.preservation_ratio = None
         self.url_probs = None
         self.lora_base_model_8bit = None
+        self.lora_base_model_4bit = None
         self.use_adamw_8bit = False
 
         # lora
@@ -176,6 +177,9 @@ class TrainingParameters:
 
             # load the base model in 8bit
             self.lora_base_model_8bit = True if 'lora_base_model_8bit' in yaml_root.keys() else False
+
+            # load the base model in 4bit (bitsandbytes QLoRA-style quantization)
+            self.lora_base_model_4bit = True if 'lora_base_model_4bit' in yaml_root.keys() else False
 
             if 'lora_dropout' in yaml_root.keys():
                 self.lora_dropout = float(yaml_root['lora_dropout'])
