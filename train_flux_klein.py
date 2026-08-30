@@ -1,7 +1,7 @@
 import argparse
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_256_BIN, ASPECT_RATIO_512_BIN, ASPECT_RATIO_1024_BIN
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_sigma import ASPECT_RATIO_2048_BIN
-from diffusers import FlowMatchEulerDiscreteScheduler, Flux2Transformer2DModel, Flux2KleinPipeline
+from diffusers import FlowMatchEulerDiscreteScheduler, Flux2Transformer2DModel, Flux2KleinPipeline, BitsAndBytesConfig
 from diffusers.training_utils import compute_density_for_timestep_sampling
 import torch
 import tqdm
@@ -10,27 +10,49 @@ from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
 from common.trainer import Model
 from common.features_extractor import FeaturesExtractor
+from diffusers.quantizers import PipelineQuantizationConfig
 
 class KleinModel(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
-        
+
+        pipeline_quant_config = PipelineQuantizationConfig(
+            quant_backend="bitsandbytes_4bit",
+            quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": torch.bfloat16},
+            components_to_quantize=["text_encoder"],
+        )
+
+        # same fix as PixelDiT lora training: quantize the DiT transformer itself to 4bit, since
+        # components_to_quantize above only covers the text_encoder and leaves the (multi-billion
+        # param) transformer in full bf16, which is what was actually blowing up VRAM.
+        transformer_quant_config = None
+        if params.lora_base_model_4bit:
+            transformer_quant_config = BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16
+            )
+
         if params.pretrained_model_path != None:
             transformer = Flux2Transformer2DModel.from_pretrained(params.pretrained_model_path, 
-                                                                 quantization_config=self.quantization_config, 
+                                                                 quantization_config=transformer_quant_config, 
                                                                  torch_dtype=torch.bfloat16,
                                                                  device_map=f"cuda:{self.accelerator.process_index}")
-            self.pipe = Flux2KleinPipeline.from_pretrained(params.pretrained_pipe_path, transformer=transformer, torch_dtype=torch.bfloat16) 
+            self.pipe = Flux2KleinPipeline.from_pretrained(params.pretrained_pipe_path, transformer=transformer, torch_dtype=torch.bfloat16, quantization_config=pipeline_quant_config) 
         else:
-            self.pipe = Flux2KleinPipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16) 
+            pipe_kwargs = dict(torch_dtype=torch.bfloat16, quantization_config=pipeline_quant_config)
+            if params.lora_base_model_4bit:
+                pipe_kwargs['transformer'] = Flux2Transformer2DModel.from_pretrained(
+                    params.pretrained_pipe_path,
+                    subfolder='transformer',
+                    quantization_config=transformer_quant_config,
+                    torch_dtype=torch.bfloat16,
+                    device_map=f"cuda:{self.accelerator.process_index}")
+            self.pipe = Flux2KleinPipeline.from_pretrained(params.pretrained_pipe_path, **pipe_kwargs)
         
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
         self.pipe.vae.train(False)
         self.pipe.text_encoder.train(False)
         #self.pipe.enable_model_cpu_offload()
         self.aspect_ratios = ASPECT_RATIO_1024_BIN
-
-        self.pipe.text_encoder.to(torch.bfloat16)
         self.pipe.vae.to(torch.bfloat16)
 
         self.model = self.pipe.transformer
@@ -46,7 +68,6 @@ class KleinModel(Model):
         pass
     
     def extract_latents(self, images):
-        # put the vae on the gpu if it's not already
         self.pipe.vae.to(device=self.accelerator.device)
         output = self.pipe.vae.encode(images.to(dtype=self.pipe.vae.dtype)).latent_dist.mode()
         output = Flux2KleinPipeline._patchify_latents(output)
@@ -54,8 +75,6 @@ class KleinModel(Model):
         return output.to(torch.bfloat16)
 
     def extract_embeddings(self, captions):
-        # move text_encoder to cuda if not already done
-        print(f'extract_embedding, device={self.accelerator.device}')
         self.pipe.text_encoder.to(device=self.accelerator.device)
         prompt_embeds, text_ids = \
         self.pipe.encode_prompt(captions,
@@ -79,13 +98,6 @@ class KleinModel(Model):
 
             neg_embeds, text_ids = self.pipe.encode_prompt(negative_prompt)
 
-        #embeds = torch.stack(embeds)
-
-        text_encoder = self.pipe.text_encoder
-        text_encoder.cpu()
-        self.pipe.to(self.accelerator.device)
-        torch.cuda.empty_cache()
-
         for embed in tqdm.tqdm(embeds, desc='Generating validation images'):
             prompt_embeds = embed
             image = self.pipe(
@@ -99,14 +111,10 @@ class KleinModel(Model):
             ).images[0]
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image), self.global_step)
             idx = idx + 1
-        
-        self.pipe.text_encoder = text_encoder.to(self.accelerator.device)
     
-    def optimize(self, ratio, latents, embeddings):
+    def optimize(self, ratio, latents, embeddings, repa_tokens, generator: torch.Generator = None):
         params = self.params
         batch_size = params.batch_size
-        self.pipe.text_encoder.cpu()
-        self.pipe.vae.cpu()
         self.model.to(self.accelerator.device)
 
         # pad the embeds to 512 tokens and generate the corresponding mask

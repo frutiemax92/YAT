@@ -244,6 +244,9 @@ class BucketSampler:
                         # as extracting features tends to use more VRAM than actually training the model
                         # we freeze the vae and text encoder model
                         ratio = self.get_ratio_from_key(closest_ratio)
+
+                        gc.collect()
+                        torch.cuda.empty_cache()
                         vae_features, embeddings, repa_features = self.extract_features(batch, ratio)
 
                         batch = Batch()

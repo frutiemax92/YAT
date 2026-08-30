@@ -129,6 +129,13 @@ class Model:
             self.aspect_ratios = ASPECT_RATIO_512_BIN
         elif self.params.aspect_ratios == 1024:
             self.aspect_ratios = ASPECT_RATIO_1024_BIN
+        elif self.params.aspect_ratios != None:
+            ratio = self.params.aspect_ratios / 1024
+            self.aspect_ratios = ASPECT_RATIO_1024_BIN
+            for key in self.aspect_ratios.keys():
+                self.aspect_ratios[key][0] = float(math.floor(self.aspect_ratios[key][0] * ratio))
+                self.aspect_ratios[key][1] = float(math.floor(self.aspect_ratios[key][1] * ratio))
+                
         # use flash attention
         # sana's transformer cannot use this
         torch.backends.cuda.enable_flash_sdp(True)
@@ -235,9 +242,9 @@ class Model:
                         alpha=params.fourierft_alpha, 
                         scaling=1.0, 
                         ifft2_norm='ortho')
-                self.model = get_peft_model(self.model, config).to(dtype=dtype)
+                self.model = get_peft_model(self.model, config)
             else:
-                self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True).to(dtype=dtype)
+                self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True)
             self.model.print_trainable_parameters()
 
         params_to_optimizer = self.model.parameters()

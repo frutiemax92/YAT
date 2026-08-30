@@ -137,10 +137,18 @@ class PixelDITModel(Model):
         print(f"REPA encoder index: {self.model.core.repa_encoder_index}")
         print(f"Patch depth: {self.model.core.patch_depth}")
         
+        # Training-time schedule: FlowMatchEulerDiscreteScheduler populates `sigmas`/`timesteps`
+        # (length num_train_timesteps, already shifted by flow_shift) directly in __init__, so
+        # `get_sigmas()` in optimize() can index them without calling set_timesteps(). This
+        # mirrors diffusers' own flow-matching training scripts (e.g. SD3/Flux dreambooth-lora).
+        # DPMSolverMultistepScheduler is unsuitable here: even with use_flow_sigmas=True, its
+        # `sigmas`/`timesteps` only get the flow schedule inside set_timesteps() (meant for a
+        # small number of inference steps); before that call they default to the VP/DDPM
+        # sigma_t = sqrt((1-alphas_cumprod)/alphas_cumprod), which is what was silently being
+        # used for every training step.
         self.scheduler = FlowMatchEulerDiscreteScheduler(
             num_train_timesteps=1000,
-            time_shift_type='linear',
-            shift=config.scheduler.flow_shift,  # Use flow_shift from config
+            shift=config.scheduler.flow_shift,
         )
         self.inference_scheduler = DPMSolverMultistepScheduler(
             num_train_timesteps=1000,
@@ -256,21 +264,23 @@ class PixelDITModel(Model):
 
         u = compute_density_for_timestep_sampling('logit_normal', batch_size, logit_mean=0, logit_std=1.0, mode_scale=None, generator=generator)
         u = u.to(self.accelerator.device)  # Move to device
-        indices = (u * self.scheduler.config.num_train_timesteps).long().cpu()  # Move indices to CPU for indexing
-        timesteps = self.scheduler.timesteps[indices].to(self.accelerator.device)
+        num_train_timesteps = self.scheduler.config.num_train_timesteps
+        indices = (u * num_train_timesteps).long().clamp_(0, num_train_timesteps - 1)
+        # PixDiT's own _WrappedModel (diffusion/model/respace.py) remaps a raw index t to
+        # new_sigmas[t]*num_train_timesteps before ever calling the network, so the model is
+        # always conditioned on the shift-warped sigma*N value, never the raw index itself -
+        # self.scheduler.timesteps already stores exactly that value per array position.
+        # scheduler.timesteps lives on CPU, so index with a CPU copy before moving the result.
+        timesteps = self.scheduler.timesteps[indices.cpu()].to(self.accelerator.device)
 
-        def get_sigmas(timesteps, n_dim=4, dtype=torch.float32):
+        def get_sigmas(indices, n_dim=4, dtype=torch.float32):
             sigmas = self.scheduler.sigmas.to(device=self.accelerator.device, dtype=dtype)
-            schedule_timesteps = self.scheduler.timesteps.to(self.accelerator.device)
-            timesteps = timesteps.to(self.accelerator.device)
-            step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
-
-            sigma = sigmas[step_indices].flatten()
+            sigma = sigmas[indices].flatten()
             while len(sigma.shape) < n_dim:
                 sigma = sigma.unsqueeze(-1)
             return sigma
         
-        sigmas = get_sigmas(timesteps, latents.ndim, dtype=latents.dtype)
+        sigmas = get_sigmas(indices, latents.ndim, dtype=latents.dtype)
         noisy_model_input = (1.0 - sigmas) * latents + sigmas * noise
 
         # Keep everything in bfloat16. Gradient checkpointing now happens per-block inside
@@ -286,7 +296,7 @@ class PixelDITModel(Model):
         
         # Combine with REPA loss if available
         if repa_loss is not None:
-            repa_weight = getattr(self.params, 'repa_loss_weight', 0.1)
+            repa_weight = 0.5
             self.repa_loss = repa_loss.item() if torch.is_tensor(repa_loss) else repa_loss
             loss = main_loss + repa_weight * repa_loss
         else:

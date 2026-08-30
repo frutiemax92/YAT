@@ -1,6 +1,6 @@
 import argparse
 from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import ASPECT_RATIO_512_BIN, ASPECT_RATIO_1024_BIN
-from diffusers import Krea2Transformer2DModel, Krea2Pipeline, FlowMatchEulerDiscreteScheduler
+from diffusers import Krea2Transformer2DModel, Krea2Pipeline, FlowMatchEulerDiscreteScheduler, BitsAndBytesConfig
 from diffusers.training_utils import compute_density_for_timestep_sampling
 import torch
 import tqdm
@@ -15,26 +15,44 @@ class Krea2Model(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
 
+        # bnb 4bit for the (huge, resident every step since compute_features runs it live) Qwen3-VL text encoder.
+        # Gated on lora_base_model_4bit, NOT use_adamw_8bit (that flag only controls the optimizer choice).
+        pipeline_quant_config = PipelineQuantizationConfig(
+            quant_backend="bitsandbytes_4bit",
+            quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": torch.bfloat16},
+            components_to_quantize=["text_encoder"],
+        ) if params.lora_base_model_4bit else None
+
+        # separate bnb config for the transformer: PipelineQuantizationConfig only quantizes components the
+        # pipe itself instantiates from the checkpoint, so a transformer passed in pre-built (pretrained_model_path
+        # branch) or loaded standalone (subfolder branch below) needs its own quantization_config to actually shrink.
+        transformer_quant_config = None
+        if params.lora_base_model_4bit:
+            transformer_quant_config = BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16
+            )
+
         if params.pretrained_model_path != None:
             transformer = Krea2Transformer2DModel.from_pretrained(params.pretrained_model_path,
+                                                                 quantization_config=transformer_quant_config,
                                                                  torch_dtype=torch.bfloat16,
                                                                  device_map=f"cuda:{self.accelerator.process_index}")
 
-            if params.use_adamw_8bit:
-                pipeline_quant_config = PipelineQuantizationConfig(
-                    quant_backend="bitsandbytes_4bit",
-                    quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": torch.bfloat16},
-                    components_to_quantize=["transformer", "text_encoder"],
-                )
-            else:
-                pipeline_quant_config = None
             self.pipe = Krea2Pipeline.from_pretrained(
                 params.pretrained_pipe_path,
                 quantization_config=pipeline_quant_config,
                 transformer=transformer,
                 torch_dtype=torch.bfloat16)
         else:
-            self.pipe = Krea2Pipeline.from_pretrained(params.pretrained_pipe_path, torch_dtype=torch.bfloat16)
+            pipe_kwargs = dict(torch_dtype=torch.bfloat16, quantization_config=pipeline_quant_config)
+            if params.lora_base_model_4bit:
+                pipe_kwargs['transformer'] = Krea2Transformer2DModel.from_pretrained(
+                    params.pretrained_pipe_path,
+                    subfolder='transformer',
+                    quantization_config=transformer_quant_config,
+                    torch_dtype=torch.bfloat16,
+                    device_map=f"cuda:{self.accelerator.process_index}")
+            self.pipe = Krea2Pipeline.from_pretrained(params.pretrained_pipe_path, **pipe_kwargs)
 
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
         self.pipe.vae.train(False)
@@ -117,6 +135,8 @@ class Krea2Model(Model):
                 guidance_scale=4.5,
                 num_inference_steps=28,
                 generator=generator,
+                width=512,
+                height=512,
             ).images[0]
             self.logger.add_image(f'validation/{idx}/{params.validation_prompts[idx]}', pil_to_tensor(image), self.global_step)
             idx = idx + 1
