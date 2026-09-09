@@ -52,22 +52,89 @@ The model will be saved for each validation, which is defined by the `num_steps_
 
 ## List of parameters in the config file
 
-Here is the current list of parameters in the config file.
+Here is the current list of parameters in the config file. Every option is optional unless stated
+otherwise; a boolean option is enabled by simply being present in the file (`use_ema: True`), and
+removing the line is what disables it.
+
+### Dataset
 
 - `r2_endpoint` : the endpoint for Cloudflare r2
 - `r2_access_key` : the access key for Cloudflare r2
 - `r2_secret_key` : the secret key for Cloudflare r2
 - `r2_bucket_name` : the bucket name containing your TAR files in Cloudflare r2
-- `r2_tar_files` : a list of TAR files that will form your dataset. There will be randomly sampled with equal weights.
+- `r2_dataset_folder` : the folder inside the bucket that holds the dataset shards. The trainer builds the shard names itself as `shard-000000.tar`, `shard-000001.tar`, and so on.
+- `num_shards` : how many shards that folder contains. The range is split evenly between the GPUs, so each process downloads from its own slice of the dataset.
+- `local_shard_paths` : a list of TAR files already downloaded on the machine. When it is set, the shards are picked from that list instead of being downloaded from r2, which is the most stable option.
+- `dataset_seed` : the seed used to pick the shards and to shuffle the samples. It also decides the order the precalculated features are replayed in.
+- `r2_tar_files` : a list of TAR files that will form your dataset. There will be randomly sampled with equal weights. It comes from the older dataset layout and is superseded by `r2_dataset_folder` and `num_shards`, which is what the trainer reads now.
+- `urls` : contains the public urls that point to the TAR files in the form of WebDataset. Same thing, it is read from the config but no longer used.
+
+### Training
+
 - `batch_size` : the batch size for the training. The effective batch size will be `num_gpus * batch_size`
 - `learning_rate` : the learning rate for the training.
 - `steps` : the total number of steps for the training. Since the dataset is an iterative one, deducing automatically the number of images in the dataset is expensive, therefore it's better to manually set it. The number of `epochs` will be `steps / (number of images in your dataset)`
-- `bfloat16` : do the training entirely in bfloat16. This is highly suggested for saving VRAM; it takes a boolean value (true of false).
+- `num_steps_per_validation` : the number of steps between two validations. The model is also saved under `models/<step>` at every validation.
+- `warmup_steps` : the learning rate ramps up linearly from zero over that many steps, then stays at `learning_rate`.
+- `weight_decay` : the weight decay of the optimizer, defaults to `0.0`.
 - `gradient_accumulation_steps` : the gradient accumulation steps, which will increase the effective batch size at the cost of slower training.
+- `bfloat16` : do the training entirely in bfloat16. This is highly suggested for saving VRAM; it takes a boolean value (true of false).
+- `use_adamw_8bit` : use the 8 bit Lion optimizer from bitsandbytes instead of AdamW, which saves VRAM on the optimizer states.
+- `use_ema` : keep an exponential moving average of the weights (decay `0.999`) and validate and save from it instead of the raw weights.
+- `train_unconditional_prob` : the probability that a batch is trained with the empty prompt embedding instead of its own captions, which trains the unconditional branch used by classifier-free guidance.
+- `timesteps` : a list of timestep indices to restrict the training to, instead of sampling them from the usual distribution. This is how a refiner model is trained: the lora is also disabled at validation for the timesteps that are not in the list.
+- `aspect_ratio` : overrides the aspect ratio bucket table. `512` and `1024` select the standard tables, any other value scales the 1024 table by `aspect_ratio / 1024`.
+- `exploration_steps` : from the paper *explorative modeling: unlocking a third pretraining axis and end-to-end generation*. Each step draws that many noise samples, and the one with the lowest loss is the one that gets trained on.
+- `dual_gpu` : dedicate the second GPU to the feature extraction and send the features to the first GPU, which only trains. It cannot be combined with `precompute_features`.
+- `low_vram` : use this when low on VRAM. For SANA, it is possible with this option to train with a `batch size=4`, `lora_rank=8`, `lora_algo=lora` under 12 GB VRAM (tested on dual RTX4070s). Only the SD3.5 trainer acts on it at the moment.
 - `validation_prompts` : a list of validation prompts for your validation.
+
+### Model
+
 - `pretrained_pipe_path` : a path to the diffusers pipeline, either hosted locally or on HuggingFace
-- `urls` : contains the public urls that point to the TAR files in the form of WebDataset
 - `pretrained_model_path` : a path to the model that will get trained that is part of the pipeline. This is used when you want to start from a finetuned model and use the default pipeline.
+- `pretrained_pipe_single_file` : a path or url to a single safetensors checkpoint in the original (CompVis) format, which is how the finetunes from civitai are distributed.
+
+### Features
+
+The trainer can either run the VAE and the text encoder on every batch, precalculate them once at
+startup, or read features that were extracted in a separate pass.
+
+- `compute_features` : the dataset shards contain images and captions, so the VAE and the text encoder run on every batch to produce the latents and the embeddings. Without it, the shards are expected to already contain `latent.pt` and `emb.pt` entries.
+- `vae_max_batch_size` : how many images the VAE encodes at once. Extracting features takes more VRAM than the training itself, so this is usually smaller than `batch_size`.
+- `text_encoder_max_batch_size` : the same thing for the text encoder.
+- `precompute_features` : run the VAE and the text encoder once at startup over a pool of samples, write the latents and the embeddings to disk, then free both models so they don't take any VRAM during the training steps. The training then loops over that pool of precalculated features.
+- `precompute_size` : the number of samples to precalculate. It defaults to `cache_size`. Note that the training only ever sees those samples, so this is a trade-off between VRAM/speed and dataset diversity.
+- `precompute_cache_dir` : where the precalculated features are written, defaults to `precomputed_features`. A cache that matches the current `batch_size` and is big enough is reused on the next run instead of being recalculated.
+- `precompute_force` : recalculate the features even when a usable cache is already on disk.
+- `extract_features` : instead of training, encode the whole dataset and upload the resulting latents and embeddings as WebDataset shards to r2. A later run can then train on them without `compute_features`.
+- `r2_upload_key` : the folder in the bucket the extracted shards are uploaded to.
+- `r2_upload_shard_size` : the number of samples per uploaded shard.
+- `cache_size` : the default value for `precompute_size`.
+
+The validation prompts are still encoded by the text encoder, so it can only be freed once its
+embeddings have been memoized. A model that implements `encode_validation_prompts` (SANA and Krea 2
+do) encodes them at the end of the precompute pass, and its text encoder is then freed before the
+lora is even built, which is what makes a big text encoder fit next to the model on a small card.
+Any other model keeps its text encoder until the first validation has run. The VAE is kept on the
+CPU either way, and moved back to the GPU only while the validation images are decoded.
+
+Those embeddings are written next to the features, so on a later run with the same
+`validation_prompts` the text encoder is not even loaded: SANA and Krea 2 build their pipeline
+without it. Changing `validation_prompts` means it has to be loaded again to encode the new ones.
+The VRAM in use is printed at the end of the pass, before and after the VAE and the text encoder are
+let go, which is the quickest way to see what is actually taking the memory.
+
+`precompute_features` also works for a dreambooth training. The pass keeps the sampling order of the
+dreambooth sampler, so the pool is filled with the instance images repeated `dreambooth_num_repeats`
+times, then every sample of `dreambooth_num_regularisation_passes` shards of the regularization
+dataset, and so on with different shards until `precompute_size` samples have been written. The
+number of instance and regularization samples that ended up in the pool is printed at the end of the
+pass. The training itself shuffles the pool at every epoch, so the batches are no longer in that
+order, only the proportions are kept.
+
+### LoRA
+
 - `lora_rank` : the rank of the lora (see https://arxiv.org/abs/2106.09685)
 - `lora_alpha` : the alpha parameter for lora training. A correct value is `lora_alpha=lora_rank`.
 - `lora_dropout` : dropout probability for lora training
@@ -75,11 +142,45 @@ Here is the current list of parameters in the config file.
   - `lora`
   - `loha`
   - `lokr`
+  - `fourierft`
 - `lora_target_modules` : the names of the targeted modules for the reparametrization. For SANA, a good value is `conv_inverted conv_point to_q to_k to_v to_out.0 linear_1 linear_2 proj`.
 - `lora_pretrained` : if you want to resume training from a lora model, specify it there
-- `low_vram` : use this when low on VRAM. For SANA, it is possible with this option to train with a `batch size=4`, `lora_rank=8`, `lora_algo=lora` under 12 GB VRAM (tested on dual RTX4070s)
+- `lora_use_dora` : use DoRA (weight decomposed low rank adaptation) instead of plain lora.
+- `lora_base_model_8bit` : load the frozen base model in 8 bit with bitsandbytes.
+- `lora_base_model_4bit` : load the frozen base model in 4 bit (nf4, QLoRA style). For the models with a big text encoder, such as Krea 2, it also quantizes the text encoder.
+- `fourierft_alpha` : the alpha of the `fourierft` algorithm, defaults to `0.01`.
+
+### Dreambooth
+
+Setting `dreambooth_dataset_folder` switches the sampler to the dreambooth one, which alternates
+between the instance images and the regularization images.
+
+- `dreambooth_dataset_folder` : the folder or TAR file holding the instance images.
+- `dreambooth_regularization_folder` : the folder holding the regularization images. When `r2_bucket_name` is set, the regularization images are taken from the dataset shards instead.
+- `dreambooth_instance` : the instance prompt, used as the caption of the instance images that have no caption of their own.
+- `dreambooth_class` : the class prompt, used the same way for the regularization images.
+- `dreambooth_num_repeats` : how many times the instance images are repeated between two regularization passes.
+- `dreambooth_num_regularisation_passes` : how many regularization shards are consumed in between. With `1`, the instance images and one regularization shard strictly alternate.
+- `dreambooth_lambda` : the weight of the regularization loss. It is read and passed to the sampler, but it is not applied to the loss at the moment.
+
+### REPA
+
+- `use_repa` : extract DINOv2 features next to the latents, for representation alignment (see https://arxiv.org/abs/2410.06940).
+- `repa_lambda` : the weight of the alignment loss, defaults to `0.05`. The loss itself is currently commented out in the trainer, so only the feature extraction is active.
+- `repa_pretrained_model` : read from the config but not used yet.
+
+### Read but currently unused
+
+These keys are still parsed, so an old config file keeps working, but nothing reads them anymore.
+
 - `use_preservation` : the original model under training is cloned in a frozen copy. The training loss is then `loss_tot=loss_noise + preservation_ratio*loss_reconstruction`. Use this if you want to preserve some of the original model behaviour.
 - `preservation_ratio` : the ratio as explained just above
+- `url_probs` : the sampling weights that went with `urls`.
+- `huggingface_dataset_repo` : a dataset repository on HuggingFace.
+- `use_calculated_features`
+- `lora_bias`, `lora_use_rslora`
+- `cyclic_lr_max_lr`, `cyclic_lr_step_size_up`, `cyclic_lr_step_size_down`, `cylic_lr_mode` : the cyclic learning rate scheduler, replaced by `warmup_steps`.
+- `save_to_disk`, `bucket_repeat` : only used by the older caching sampler in `common/cache.py`.
 
 ## About this repository
 

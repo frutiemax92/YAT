@@ -10,20 +10,40 @@ from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
 from common.trainer import Model
+from common.precompute import precomputed_prompts_available
 from common.features_extractor import FeaturesExtractor
 from diffusers.quantizers import PipelineQuantizationConfig
+
+COMPLEX_HUMAN_INSTRUCTION = [
+    "Given a user prompt, generate an 'Enhanced prompt' that provides detailed visual descriptions suitable for image generation. Evaluate the level of detail in the user prompt:",
+    "- If the prompt is simple, focus on adding specifics about colors, shapes, sizes, textures, and spatial relationships to create vivid and concrete scenes.",
+    "- If the prompt is already detailed, refine and enhance the existing details slightly without overcomplicating.",
+    "Here are examples of how to transform or refine prompts:",
+    "- User Prompt: A cat sleeping -> Enhanced: A small, fluffy white cat curled up in a round shape, sleeping peacefully on a warm sunny windowsill, surrounded by pots of blooming red flowers.",
+    "- User Prompt: A busy city street -> Enhanced: A bustling city street scene at dusk, featuring glowing street lamps, a diverse crowd of people in colorful clothing, and a double-decker bus passing by towering glass skyscrapers.",
+    "Please generate only the enhanced description for the prompt below and avoid including any additional commentary or evaluations:",
+    "User Prompt: ",
+]
+
 
 class SanaModel(Model):
     def __init__(self, params : TrainingParameters):
         super().__init__(params)
         
+        # a previous precompute pass left every embedding the training and the validation need on
+        # disk, so the gemma text encoder does not have to be loaded at all
+        self.skip_text_encoder = precomputed_prompts_available(params, self.accelerator.process_index)
+        if self.skip_text_encoder:
+            print('using the precomputed prompt embeddings, the text encoder is not loaded')
+        text_encoder_kwargs = {'text_encoder': None} if self.skip_text_encoder else {}
+
         # bnb 4bit quantization, gated on lora_base_model_4bit (NOT use_adamw_8bit, which only controls
         # the optimizer choice).
         pipeline_quant_config = PipelineQuantizationConfig(
             quant_backend="bitsandbytes_4bit",
             quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": torch.bfloat16},
             components_to_quantize=["text_encoder"],
-        ) if params.lora_base_model_4bit else None
+        ) if params.lora_base_model_4bit and not self.skip_text_encoder else None
 
         # separate bnb config for the transformer: PipelineQuantizationConfig only quantizes components the
         # pipe itself instantiates from the checkpoint, so a transformer passed in pre-built (pretrained_model_path
@@ -44,9 +64,11 @@ class SanaModel(Model):
                 params.pretrained_pipe_path, 
                 quantization_config=pipeline_quant_config, 
                 transformer=transformer, 
-                torch_dtype=torch.bfloat16) 
+                torch_dtype=torch.bfloat16,
+                **text_encoder_kwargs) 
         else:
-            pipe_kwargs = dict(torch_dtype=torch.bfloat16, quantization_config=pipeline_quant_config)
+            pipe_kwargs = dict(torch_dtype=torch.bfloat16, quantization_config=pipeline_quant_config,
+                               **text_encoder_kwargs)
             if params.lora_base_model_4bit:
                 pipe_kwargs['transformer'] = SanaTransformer2DModel.from_pretrained(
                     params.pretrained_pipe_path,
@@ -58,7 +80,8 @@ class SanaModel(Model):
         
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
         self.pipe.vae.train(False)
-        self.pipe.text_encoder.train(False)
+        if self.pipe.text_encoder != None:
+            self.pipe.text_encoder.train(False)
 
         vae_compression = 32
         resolution = self.pipe.transformer.config.sample_size * vae_compression
@@ -113,7 +136,17 @@ class SanaModel(Model):
     
     def enable_efficient_attention(self):
         pass
-    
+
+    def encode_validation_prompts(self):
+        # the same calls validate() makes, so the precompute pass can memoize them and free the
+        # text encoder before the training starts. when it was never loaded, these all come back
+        # from the memoized embeddings
+        if self.pipe.text_encoder != None:
+            self.pipe.text_encoder.to(device=self.accelerator.device)
+        for prompt in self.params.validation_prompts:
+            self.pipe.encode_prompt(prompt, complex_human_instruction=COMPLEX_HUMAN_INSTRUCTION)
+        return True
+
     def validate(self):
         params = self.params
         vae = self.pipe.vae
@@ -128,16 +161,7 @@ class SanaModel(Model):
         latents = []
         embeds = []
 
-        complex_human_instruction = [
-            "Given a user prompt, generate an 'Enhanced prompt' that provides detailed visual descriptions suitable for image generation. Evaluate the level of detail in the user prompt:",
-            "- If the prompt is simple, focus on adding specifics about colors, shapes, sizes, textures, and spatial relationships to create vivid and concrete scenes.",
-            "- If the prompt is already detailed, refine and enhance the existing details slightly without overcomplicating.",
-            "Here are examples of how to transform or refine prompts:",
-            "- User Prompt: A cat sleeping -> Enhanced: A small, fluffy white cat curled up in a round shape, sleeping peacefully on a warm sunny windowsill, surrounded by pots of blooming red flowers.",
-            "- User Prompt: A busy city street -> Enhanced: A bustling city street scene at dusk, featuring glowing street lamps, a diverse crowd of people in colorful clothing, and a double-decker bus passing by towering glass skyscrapers.",
-            "Please generate only the enhanced description for the prompt below and avoid including any additional commentary or evaluations:",
-            "User Prompt: ",
-        ]
+        complex_human_instruction = COMPLEX_HUMAN_INSTRUCTION
 
         for prompt in tqdm.tqdm(params.validation_prompts, desc='Generating validation embeddings'):
             text_encoder = text_encoder.to(device=self.accelerator.device)

@@ -78,6 +78,9 @@ class BucketSampler:
         self.local_paths = local_paths
         self.bucket_to_yield = torch.tensor([-1])
 
+        # set while iterating, so the shard downloader can be stopped when we stop consuming batches
+        self.download_process = None
+
         def local_file_getter(process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
             print('using local file getter')
             
@@ -208,6 +211,7 @@ class BucketSampler:
         to_remove = mp.Queue()
         p = mp.Process(target=self.download_shard_proc, args=(self.process_index, to_train, to_remove))
         p.start()
+        self.download_process = p
 
         cache_index = 0
         while True:
@@ -437,7 +441,10 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
             model,
             seed,
             cache_size,
-            local_temp_dir
+            # keywords: local_temp_dir used to land in the use_repa slot, which loaded dinov2 and
+            # extracted repa features on every dreambooth run
+            use_repa=False,
+            local_temp_dir=local_temp_dir,
         )
         self.dreambooth_dataset_folder = dreambooth_dataset_folder
         self.dreambooth_regularization_folder = dreambooth_regularization_folder
@@ -453,6 +460,21 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
             current_item = 0
             local_files = 0
             while True:
+                if to_train.qsize() >= 4:
+                    # don't run ahead of the training, and clean up the shards it is done with.
+                    # only the shards we downloaded ourselves get deleted, never a local folder
+                    # the user pointed us at
+                    try:
+                        elem = to_remove.get(timeout=1)
+                        if elem:
+                            reg_shard, local_shard_path = elem
+                            if reg_shard and self.r2_bucket_name != None:
+                                self.cleanup_shard(local_shard_path)
+                                local_files = local_files - 1
+                    except:
+                        pass
+                    continue
+
                 if current_item % 2 == 0:
                     for r in range(self.dreambooth_num_repeats):
                         to_train.put((False, self.dreambooth_dataset_folder))
@@ -485,7 +507,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
                         elem = to_remove.get(timeout=10)
                         if elem:
                             reg_shard, local_shard_path = elem
-                            if reg_shard:
+                            if reg_shard and self.r2_bucket_name != None:
                                 self.cleanup_shard(local_shard_path)
                                 local_files = local_files - 1
                     except:

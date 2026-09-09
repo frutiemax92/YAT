@@ -58,6 +58,12 @@ class TrainingParameters:
 
         # from the paper explorative modeling: unlocking a third pretraining axis and end-to-end generation
         self.exploration_steps = None
+
+        # precalculate the vae/text encoder features once at startup, then train without them
+        self.precompute_features = False
+        self.precompute_size = None
+        self.precompute_cache_dir = 'precomputed_features'
+        self.precompute_force = False
     
     def read_yaml(self, file):
         with open(file) as f:
@@ -230,6 +236,25 @@ class TrainingParameters:
         # exploration steps
         if 'exploration_steps' in yaml_root.keys():
             self.exploration_steps = int(yaml_root['exploration_steps'])
+
+        # precalculate the vae and text encoder features at startup, write them to disk, then free
+        # those models so they don't take vram during the training steps
+        self.precompute_features = 'precompute_features' in yaml_root.keys()
+        if self.precompute_features:
+            # the number of samples to precalculate, the training then loops over that pool
+            self.precompute_size = int(yaml_root['precompute_size']) if 'precompute_size' in yaml_root.keys() else self.cache_size
+            if 'precompute_cache_dir' in yaml_root.keys():
+                self.precompute_cache_dir = yaml_root['precompute_cache_dir']
+
+            # recalculate even if a usable cache is already on disk
+            self.precompute_force = 'precompute_force' in yaml_root.keys()
+
+            # the precompute pass reads images and captions, so it needs the extracting sampler
+            self.compute_features = True
+            if 'vae_max_batch_size' not in yaml_root.keys():
+                self.vae_max_batch_size = 1
+            if 'text_encoder_max_batch_size' not in yaml_root.keys():
+                self.text_encoder_max_batch_size = 1
 
 if __name__ == '__main__':
     params = TrainingParameters()

@@ -16,6 +16,7 @@ import os
 from diffusers.training_utils import compute_density_for_timestep_sampling
 import math
 from common.repa import RepaModel, RepaConfig
+from common.precompute import FeaturesPrecompute
 from accelerate.utils import InitProcessGroupKwargs, DistributedDataParallelKwargs
 from datetime import timedelta
 from peft.helpers import rescale_adapter_scale
@@ -27,6 +28,11 @@ class Model:
         os.environ['NCCL_P2P_DISABLE'] = '1'
         os.environ['NCCL_IB_DISABLE'] = '1'
         os.environ["NCCL_TIMEOUT"] = "100000000"
+
+        # a quantized model dequantizes a different weight on every layer of every step, which
+        # fragments the allocator badly. Expandable segments give that memory back instead of
+        # holding it reserved. Set before anything touches cuda, and overridable from the outside.
+        os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
 
         self.accelerator = Accelerator(
             gradient_accumulation_steps=params.gradient_accumulation_steps,
@@ -85,6 +91,9 @@ class Model:
         
         self.global_step = 0
 
+        # set by initialize() when the features are precalculated instead of extracted every step
+        self.features_precompute = None
+
         # check if we use a quantization technique (for lora training)
         self.quantization_config = None
         if self.params.lora_base_model_8bit:
@@ -102,7 +111,17 @@ class Model:
     
     def extract_embeddings(self, captions):
         raise NotImplemented
-    
+
+    def encode_validation_prompts(self):
+        """Encode everything validate() will ask the text encoder for, and return True.
+
+        The precompute pass memoizes the embeddings, so a model that implements this can have its
+        text encoder freed before the training starts instead of after the first validation. The
+        calls have to match the ones validate() makes, arguments included, for the memoized
+        embeddings to be found again.
+        """
+        return False
+
     def format_embeddings(self, embeds):
         pass
 
@@ -214,7 +233,15 @@ class Model:
 
         if self.params.dual_gpu:
             self.sampler.__class__ = PatchedSampler
-        
+
+        # run the vae and the text encoder once over a pool of samples, write the features to disk,
+        # then train from those so both models stay out of the vram during the training steps
+        if self.params.precompute_features:
+            if self.params.dual_gpu:
+                raise ValueError('precompute_features cannot be combined with dual_gpu')
+            self.features_precompute = FeaturesPrecompute(self)
+            self.sampler = self.features_precompute.run(self.sampler)
+
         # check for lora training
         if self.params.lora_rank != None:
             dtype = self.model.dtype
@@ -310,9 +337,11 @@ class Model:
         avg_loss = torch.tensor(0, device=self.accelerator.device)
 
         # extract empty embedding
+        # the precompute pass already did it, back when the text encoder was still loaded
         self.accelerator.wait_for_everyone()
-        with torch.no_grad():
-            self.empty_embeddings = self.extract_embeddings([''])
+        if self.features_precompute == None:
+            with torch.no_grad():
+                self.empty_embeddings = self.extract_embeddings([''])
 
         while self.global_step < self.params.steps:
             # then go through the cache items
@@ -398,7 +427,12 @@ class Model:
 
                                 # for now, validating with this patch is disabled
                                 if self.params.dual_gpu == False:
+                                    # the vae is parked on the cpu between validations
+                                    if self.features_precompute != None:
+                                        self.features_precompute.before_validation()
                                     self.validate()
+                                    if self.features_precompute != None:
+                                        self.features_precompute.after_validation()
 
                                 if len(self.timesteps) != 0:
                                     rescale_adapter_scale(self.model, 1.0)
