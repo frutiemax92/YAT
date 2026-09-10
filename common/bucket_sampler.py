@@ -217,6 +217,10 @@ class BucketSampler:
         while True:
             local_shard_path = self.get_local_shard_path(to_train)
 
+            # the worker signals that it has nothing more to hand out
+            if local_shard_path is None:
+                break
+
             dataset = (
                 wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None)
                 .shuffle(1000)
@@ -455,8 +459,59 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
         self.dreambooth_num_regularisation_passes = dreambooth_num_regularisation_passes
         self.reg_shard = False
 
+        # 'alternate' is the training behaviour: instance images, then regularization shards, on
+        # repeat. The precompute pass instead runs one phase of each, so the instance images are
+        # encoded once no matter how many times the training repeats them.
+        self.mode = 'alternate'
+
         # this is a hack to reuse the existing code!
+        def queue_regularization_shards(to_train : mp.Queue):
+            """Queue one round of regularization shards, from the bucket or from a local folder."""
+            queued = 0
+            for r in range(self.dreambooth_num_regularisation_passes):
+                if self.r2_bucket_name == None:
+                    to_train.put((True, self.dreambooth_regularization_folder))
+                else:
+                    current_shard_index = self.get_next_shard_index()
+                    dataset_url = get_secured_urls(self.r2_access_key,
+                                self.r2_secret_key,
+                                self.r2_endpoint,
+                                self.r2_bucket_name,
+                                [self.features_path + '/' + self.shards[current_shard_index]]
+                                )[0]
+                    local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{queued}_{time.time()}.tar'
+                    try:
+                        download_tar(dataset_url, local_shard_path)
+                    except Exception as error:
+                        print(error)
+                        continue
+                    to_train.put((True, local_shard_path))
+                    queued = queued + 1
+            return queued
+
         def download_shard_worker(process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
+            # one pass over the instance images, then stop: the features only need to be
+            # calculated once, the training repeats them from the cache
+            if self.mode == 'instance':
+                to_train.put((False, self.dreambooth_dataset_folder))
+                to_train.put(None)
+                return
+
+            # regularization images only, for the second phase of the precompute pass
+            if self.mode == 'regularization':
+                while True:
+                    if to_train.qsize() >= 4:
+                        try:
+                            elem = to_remove.get(timeout=1)
+                            if elem:
+                                reg_shard, local_shard_path = elem
+                                if reg_shard and self.r2_bucket_name != None:
+                                    self.cleanup_shard(local_shard_path)
+                        except:
+                            pass
+                        continue
+                    queue_regularization_shards(to_train)
+
             current_item = 0
             local_files = 0
             while True:
@@ -519,7 +574,10 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
         return [(-1.0, -1.0)]
     
     def get_local_shard_path(self, to_train : mp.Queue):
-        is_reg, local_shard_path = to_train.get()
+        elem = to_train.get()
+        if elem is None:
+            return None
+        is_reg, local_shard_path = elem
         self.reg_shard = is_reg
         return local_shard_path
     

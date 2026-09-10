@@ -4,6 +4,7 @@ from common.bucket_sampler import BucketSampler, BucketSamplerExtractFeatures, B
 from torch.utils.tensorboard import SummaryWriter
 import torch
 import tqdm
+import gc
 from peft import LoraConfig, get_peft_model, PeftModel
 from peft import LoHaConfig, LoKrConfig, FourierFTConfig
 import os
@@ -269,9 +270,11 @@ class Model:
                         alpha=params.fourierft_alpha, 
                         scaling=1.0, 
                         ifft2_norm='ortho')
-                self.model = get_peft_model(self.model, config)
+                self.model = get_peft_model(self.model, config,
+                                            autocast_adapter_dtype=not params.lora_adapter_bf16)
             else:
-                self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True)
+                self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True,
+                                                       autocast_adapter_dtype=not params.lora_adapter_bf16)
             self.model.print_trainable_parameters()
 
         params_to_optimizer = self.model.parameters()
@@ -427,12 +430,21 @@ class Model:
 
                                 # for now, validating with this patch is disabled
                                 if self.params.dual_gpu == False:
+                                    # give the sampling all the room it can get: the gradients
+                                    # have been applied already, and the allocator is holding on
+                                    # to blocks too small for what the validation asks for
+                                    self.optimizer.zero_grad(set_to_none=True)
+                                    gc.collect()
+                                    torch.cuda.empty_cache()
+
                                     # the vae is parked on the cpu between validations
                                     if self.features_precompute != None:
                                         self.features_precompute.before_validation()
                                     self.validate()
                                     if self.features_precompute != None:
                                         self.features_precompute.after_validation()
+                                    gc.collect()
+                                    torch.cuda.empty_cache()
 
                                 if len(self.timesteps) != 0:
                                     rescale_adapter_scale(self.model, 1.0)

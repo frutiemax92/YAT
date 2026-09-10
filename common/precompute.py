@@ -174,28 +174,44 @@ class PrecomputedBucketSampler:
     the ratios stay in lockstep across processes without any collective communication.
     """
 
-    def __init__(self, cache_dir, accelerator, seed, use_repa=False, model=None):
+    def __init__(self, cache_dir, accelerator, seed, use_repa=False, model=None,
+                 pools=None, num_repeats=1):
         self.cache_dir = cache_dir
         self.accelerator = accelerator
         self.seed = seed
         self.use_repa = use_repa
         self.model = model
-        self.rank_dir = rank_dir(cache_dir, accelerator.process_index)
-        self.manifest = read_manifest(self.rank_dir)
-        if self.manifest is None:
-            raise RuntimeError(f'no precomputed features found in {self.rank_dir}')
-        self.batches = self.manifest['batches']
+        self.num_repeats = max(1, num_repeats)
+
+        # a plain run has a single pool, a dreambooth one has the instance images and the
+        # regularization images kept apart so each is only calculated once
+        self.pools = pools if pools != None else [None]
+        self.directories = {}
+        self.pool_batches = {}
+        for pool in self.pools:
+            directory = rank_dir(cache_dir, accelerator.process_index, pool)
+            manifest = read_manifest(directory)
+            if manifest is None:
+                raise RuntimeError(f'no precomputed features found in {directory}')
+            self.directories[pool] = directory
+            self.pool_batches[pool] = manifest['batches']
+
+        self.rank_dir = self.directories[self.pools[0]]
+        self.batches = self.pool_batches[self.pools[0]]
 
     def __len__(self):
-        return len(self.batches)
+        return sum(len(batches) for batches in self.pool_batches.values())
 
-    def load_batch(self, batch_index):
-        entry = self.batches[batch_index]
+    def load_batch(self, batch_index, pool=None):
+        if pool is None:
+            pool = self.pools[0]
+        directory = self.directories[pool]
+        entry = self.pool_batches[pool][batch_index]
         latents = []
         embeddings = []
         repa_features = []
         for filename in entry['files']:
-            sample = torch.load(os.path.join(self.rank_dir, filename), map_location='cpu', weights_only=False)
+            sample = torch.load(os.path.join(directory, filename), map_location='cpu', weights_only=False)
             latents.append(sample['latent'])
             if entry['emb_per_sample']:
                 embeddings.append(sample['embedding'])
@@ -203,7 +219,7 @@ class PrecomputedBucketSampler:
                 repa_features.append(sample['repa'])
 
         if not entry['emb_per_sample']:
-            embeddings = torch.load(os.path.join(self.rank_dir, entry['emb_file']),
+            embeddings = torch.load(os.path.join(directory, entry['emb_file']),
                                     map_location='cpu', weights_only=False)
 
         batch = Batch()
@@ -219,14 +235,29 @@ class PrecomputedBucketSampler:
             batch.proj_spatial_dims = (int(aspect_ratio[0]) // patch_size, int(aspect_ratio[1]) // patch_size)
         return batch
 
+    def epoch_order(self, epoch):
+        """The (pool, index) pairs one epoch is made of.
+
+        A dreambooth epoch is the instance images repeated dreambooth_num_repeats times, then the
+        regularization pool, which is the order the dreambooth sampler produces live. The repeats
+        cost nothing here: the same cached features are replayed.
+        """
+        # the same seed on every process keeps the ratio of batch i identical across processes
+        rng = random.Random(self.seed + epoch)
+        order = []
+        for pool in self.pools:
+            indices = list(range(len(self.pool_batches[pool])))
+            repeats = self.num_repeats if pool == INSTANCE_POOL else 1
+            for _ in range(repeats):
+                rng.shuffle(indices)
+                order.extend((pool, index) for index in indices)
+        return order
+
     def __iter__(self):
         epoch = 0
         while True:
-            order = list(range(len(self.batches)))
-            # the same seed on every process keeps the ratio of batch i identical across processes
-            random.Random(self.seed + epoch).shuffle(order)
-            for batch_index in order:
-                yield self.load_batch(batch_index)
+            for pool, batch_index in self.epoch_order(epoch):
+                yield self.load_batch(batch_index, pool)
             epoch = epoch + 1
 
 
@@ -248,11 +279,14 @@ def precomputed_prompts_available(params, process_index):
     if getattr(params, 'precompute_force', False):
         return False
 
-    manifest = read_manifest(rank_dir(params.precompute_cache_dir, process_index))
-    if manifest is None:
-        return False
-    if len(manifest.get('batches', [])) < max(1, params.precompute_size // params.batch_size):
-        return False
+    wanted = max(1, params.precompute_size // params.batch_size)
+    for pool in pools_for(params):
+        manifest = read_manifest(rank_dir(params.precompute_cache_dir, process_index, pool))
+        if manifest is None:
+            return False
+        # the instance pool holds a whole small dataset, not precompute_size samples
+        if len(manifest.get('batches', [])) < (1 if pool == INSTANCE_POOL else wanted):
+            return False
 
     path = prompt_embeddings_path(params.precompute_cache_dir, process_index)
     if not os.path.exists(path):
@@ -265,8 +299,22 @@ def precomputed_prompts_available(params, process_index):
     return list(stored.get('validation_prompts') or []) == list(params.validation_prompts or [])
 
 
-def rank_dir(cache_dir, process_index):
+INSTANCE_POOL = 'instance'
+REGULARIZATION_POOL = 'regularization'
+
+
+def rank_dir(cache_dir, process_index, pool=None):
+    """Where one process keeps its features. A dreambooth run keeps two pools side by side."""
+    if pool:
+        return os.path.join(cache_dir, pool, f'rank{process_index}')
     return os.path.join(cache_dir, f'rank{process_index}')
+
+
+def pools_for(params):
+    """The pools a run is made of: one, or the instance/regularization pair for dreambooth."""
+    if getattr(params, 'dreambooth_dataset_folder', None) != None:
+        return [INSTANCE_POOL, REGULARIZATION_POOL]
+    return [None]
 
 
 def read_manifest(directory):
@@ -294,7 +342,10 @@ class FeaturesPrecompute:
         self.params = model.params
         self.accelerator = model.accelerator
         self.cache_dir = self.params.precompute_cache_dir
+        self.pools = pools_for(self.params)
         self.rank_dir = rank_dir(self.cache_dir, self.accelerator.process_index)
+        self.pool_dirs = {pool: rank_dir(self.cache_dir, self.accelerator.process_index, pool)
+                          for pool in self.pools}
         self.batch_size = self.params.batch_size
         self.num_batches = max(1, self.params.precompute_size // self.batch_size)
         self.prompt_cache = PromptEmbeddingCache(self.accelerator.device)
@@ -311,13 +362,14 @@ class FeaturesPrecompute:
             'aspect_ratios': getattr(params, 'aspect_ratios', None),
         }
         if getattr(params, 'dreambooth_dataset_folder', None) != None:
+            # dreambooth_num_repeats and dreambooth_num_regularisation_passes are deliberately
+            # not part of this: they decide how the cached features are replayed, not what gets
+            # calculated, so changing them must not throw the cache away
             signature['dreambooth'] = {
                 'dataset_folder': params.dreambooth_dataset_folder,
                 'regularization_folder': params.dreambooth_regularization_folder,
                 'instance': params.dreambooth_instance,
                 'class': params.dreambooth_class,
-                'num_repeats': params.dreambooth_num_repeats,
-                'num_regularisation_passes': params.dreambooth_num_regularisation_passes,
             }
         return signature
 
@@ -325,6 +377,8 @@ class FeaturesPrecompute:
         return prompt_embeddings_path(self.cache_dir, self.accelerator.process_index)
 
     def save_prompt_embeddings(self):
+        # they sit next to the pools, not inside one of them
+        os.makedirs(os.path.dirname(self.prompt_embeddings_path()), exist_ok=True)
         torch.save({
             'entries': self.prompt_cache.entries,
             'validation_prompts': list(self.params.validation_prompts or []),
@@ -356,24 +410,27 @@ class FeaturesPrecompute:
         if pipe is not None and hasattr(pipe, 'encode_prompt'):
             pipe.encode_prompt = self.prompt_cache.wrap('encode_prompt', pipe.encode_prompt)
 
-    def cache_is_complete(self):
-        if self.params.precompute_force:
-            return False
-        manifest = read_manifest(self.rank_dir)
+    def pool_is_complete(self, pool):
+        manifest = read_manifest(self.pool_dirs[pool])
         if manifest is None:
             return False
         if manifest.get('signature') != self.cache_signature():
             return False
-        if len(manifest.get('batches', [])) < self.num_batches:
+        # the instance pool holds the whole (small) dataset, so any of it is the whole of it
+        wanted = 1 if pool == INSTANCE_POOL else self.num_batches
+        return len(manifest.get('batches', [])) >= wanted
+
+    def cache_is_complete(self):
+        if self.params.precompute_force:
             return False
-        return True
+        return all(self.pool_is_complete(pool) for pool in self.pools)
 
     def all_processes_have_cache(self):
         local = torch.tensor([1 if self.cache_is_complete() else 0],
                              dtype=torch.int64, device=self.accelerator.device)
         return bool(torch.min(self.accelerator.gather(local)).item() == 1)
 
-    def write_batch(self, manifest_batches, batch_index, batch, regularization=None):
+    def write_batch(self, manifest_batches, batch_index, batch, pool=None, regularization=None):
         latents = batch.vae_features
         embeddings = batch.embeddings
         repa_features = batch.repa_features
@@ -390,7 +447,7 @@ class FeaturesPrecompute:
                 'repa': to_cpu(repa_features[i]) if repa_features is not None else None,
             }
             filename = f'{batch_index:07d}_{i}.pt'
-            torch.save(sample, os.path.join(self.rank_dir, filename))
+            torch.save(sample, os.path.join(self.pool_dirs[pool], filename))
             files.append(filename)
 
         entry = {
@@ -402,18 +459,18 @@ class FeaturesPrecompute:
             entry['regularization'] = bool(regularization)
         if not emb_per_sample:
             emb_file = f'{batch_index:07d}_emb.pt'
-            torch.save(to_cpu(embeddings), os.path.join(self.rank_dir, emb_file))
+            torch.save(to_cpu(embeddings), os.path.join(self.pool_dirs[pool], emb_file))
             entry['emb_file'] = emb_file
         manifest_batches.append(entry)
 
-    def write_manifest(self, manifest_batches):
+    def write_manifest(self, manifest_batches, pool=None):
         manifest = {
             'batch_size': self.batch_size,
             'use_repa': bool(self.params.use_repa),
             'signature': self.cache_signature(),
             'batches': manifest_batches,
         }
-        with open(os.path.join(self.rank_dir, 'manifest.json'), 'w') as f:
+        with open(os.path.join(self.pool_dirs[pool], 'manifest.json'), 'w') as f:
             json.dump(manifest, f)
 
     def run(self, sampler):
@@ -429,7 +486,8 @@ class FeaturesPrecompute:
             self.report_memory('with the model parked on the cpu')
 
         if cache_ready:
-            samples = len(read_manifest(self.rank_dir)['batches']) * self.batch_size
+            samples = sum(len(read_manifest(self.pool_dirs[pool])['batches'])
+                          for pool in self.pools) * self.batch_size
             print(f'skipping the extraction, reusing the {samples} samples already precomputed in '
                   f'{self.cache_dir} (delete that folder or set precompute_force to extract again)')
             self.load_prompt_embeddings()
@@ -441,25 +499,8 @@ class FeaturesPrecompute:
                 self.text_encoder_freed = True
                 self.install_text_encoder_stub()
         else:
-            if os.path.exists(self.rank_dir):
-                shutil.rmtree(self.rank_dir)
-            os.makedirs(self.rank_dir, exist_ok=True)
-
-            manifest_batches = []
-            pbar = tqdm(total=self.num_batches, desc='Precomputing latents and embeddings',
-                        disable=not self.accelerator.is_main_process)
-            for batch in sampler:
-                # the dreambooth sampler alternates between the instance images and the
-                # regularization ones, so keep track of which shard a batch came from
-                self.write_batch(manifest_batches, len(manifest_batches), batch,
-                                 regularization=getattr(sampler, 'reg_shard', None))
-                pbar.update(1)
-                if len(manifest_batches) >= self.num_batches:
-                    break
-            pbar.close()
-            self.write_manifest(manifest_batches)
-            stop_sampler(sampler)
-            self.print_composition(manifest_batches)
+            for pool in self.pools:
+                self.extract_pool(sampler, pool)
 
         # from here on the text encoder is on its way out, so remember every embedding it produces
         self.prompt_cache.recording = True
@@ -500,16 +541,48 @@ class FeaturesPrecompute:
                                         self.accelerator,
                                         self.params.dataset_seed,
                                         use_repa=self.params.use_repa,
-                                        model=self.model)
+                                        model=self.model,
+                                        pools=self.pools,
+                                        num_repeats=getattr(self.params, 'dreambooth_num_repeats', 1))
 
-    def print_composition(self, manifest_batches):
-        """Tell how the pool is split between the instance and the regularization images."""
-        if not any('regularization' in entry for entry in manifest_batches):
-            return
-        regularization = sum(1 for entry in manifest_batches if entry.get('regularization'))
-        instance = len(manifest_batches) - regularization
-        print(f'precomputed {instance * self.batch_size} instance samples and '
-              f'{regularization * self.batch_size} regularization samples')
+    def extract_pool(self, sampler, pool):
+        """Fill one pool from the sampler.
+
+        The instance pool is read once, to the end of the dataset: repeating those images is the
+        replay's job, not something worth encoding again. The regularization pool is read until
+        precompute_size samples are on disk.
+        """
+        directory = self.pool_dirs[pool]
+        if os.path.exists(directory):
+            shutil.rmtree(directory)
+        os.makedirs(directory, exist_ok=True)
+
+        # whatever the previous phase left half filled must not leak into this pool
+        for key in getattr(sampler, 'buckets', {}):
+            sampler.buckets[key].clear()
+
+        instance = pool == INSTANCE_POOL
+        if pool != None:
+            # the dreambooth sampler queues one kind of shard or the other depending on this
+            sampler.mode = pool
+        limit = None if instance else self.num_batches
+
+        label = f'Precomputing {pool} features' if pool else 'Precomputing latents and embeddings'
+        manifest_batches = []
+        pbar = tqdm(total=limit, desc=label, disable=not self.accelerator.is_main_process)
+        for batch in sampler:
+            self.write_batch(manifest_batches, len(manifest_batches), batch, pool=pool,
+                             regularization=getattr(sampler, 'reg_shard', None))
+            pbar.update(1)
+            if limit != None and len(manifest_batches) >= limit:
+                break
+        pbar.close()
+        self.write_manifest(manifest_batches, pool=pool)
+        stop_sampler(sampler)
+
+        samples = len(manifest_batches) * self.batch_size
+        label = f'{pool} ' if pool else ''
+        print(f'precomputed {samples} {label}samples in {directory}')
 
     def move_model_to_cpu(self):
         """Park the model being trained on the cpu, so the vae and the text encoder get the vram.

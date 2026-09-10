@@ -125,13 +125,21 @@ without it. Changing `validation_prompts` means it has to be loaded again to enc
 The VRAM in use is printed at the end of the pass, before and after the VAE and the text encoder are
 let go, which is the quickest way to see what is actually taking the memory.
 
-`precompute_features` also works for a dreambooth training. The pass keeps the sampling order of the
-dreambooth sampler, so the pool is filled with the instance images repeated `dreambooth_num_repeats`
-times, then every sample of `dreambooth_num_regularisation_passes` shards of the regularization
-dataset, and so on with different shards until `precompute_size` samples have been written. The
-number of instance and regularization samples that ended up in the pool is printed at the end of the
-pass. The training itself shuffles the pool at every epoch, so the batches are no longer in that
-order, only the proportions are kept.
+`precompute_features` also works for a dreambooth training, where the cache is split in two pools:
+
+    precomputed_features/instance/rank0, rank1, ...
+    precomputed_features/regularization/rank0, rank1, ...
+
+The instance images are encoded **once**, whatever `dreambooth_num_repeats` says: repeating them is
+the training's job, and it replays the same cached features. The regularization pool is filled from
+the shards of `r2_dataset_folder` until `precompute_size` samples have been written. An epoch is then
+the instance pool repeated `dreambooth_num_repeats` times, shuffled at every repeat, followed by the
+regularization pool, which is the order the live dreambooth sampler produces.
+
+Because the repeats happen at replay, `dreambooth_num_repeats` and
+`dreambooth_num_regularisation_passes` are not part of what makes a cache valid: changing them
+re-uses the same features instead of calculating them again. Changing the datasets, the prompts, the
+batch size or the aspect ratio does invalidate it.
 
 ### LoRA
 
@@ -149,6 +157,7 @@ order, only the proportions are kept.
 - `lora_base_model_8bit` : load the frozen base model in 8 bit with bitsandbytes.
 - `lora_base_model_4bit` : load the frozen base model in 4 bit (nf4, QLoRA style). For the models with a big text encoder, such as Krea 2, it also quantizes the text encoder.
 - `fourierft_alpha` : the alpha of the `fourierft` algorithm, defaults to `0.01`.
+- `lora_adapter_bf16` : keep the adapters in bfloat16 instead of the float32 peft casts them to. It roughly halves what DoRA has to materialize on every forward, at the cost of some numerical stability, so watch the loss when turning it on. On a 12 GB card it is what makes `lora_use_dora` fit with a wide `lora_target_modules` list.
 
 ### Dreambooth
 
@@ -159,7 +168,7 @@ between the instance images and the regularization images.
 - `dreambooth_regularization_folder` : the folder holding the regularization images. When `r2_bucket_name` is set, the regularization images are taken from the dataset shards instead.
 - `dreambooth_instance` : the instance prompt, used as the caption of the instance images that have no caption of their own.
 - `dreambooth_class` : the class prompt, used the same way for the regularization images.
-- `dreambooth_num_repeats` : how many times the instance images are repeated between two regularization passes.
+- `dreambooth_num_repeats` : how many times the instance images are repeated between two regularization passes. With `precompute_features` the repeats cost nothing: the features are calculated once and replayed.
 - `dreambooth_num_regularisation_passes` : how many regularization shards are consumed in between. With `1`, the instance images and one regularization shard strictly alternate.
 - `dreambooth_lambda` : the weight of the regularization loss. It is read and passed to the sampler, but it is not applied to the loss at the moment.
 

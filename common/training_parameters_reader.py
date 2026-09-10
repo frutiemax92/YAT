@@ -38,6 +38,9 @@ class TrainingParameters:
         self.lora_use_rslora = None
         self.lora_pretrained = None
 
+        # keep the lora/dora adapters in bfloat16 instead of the float32 peft casts them to
+        self.lora_adapter_bf16 = False
+
         # lr scheduler
         self.cyclic_lr_max_lr = None
         self.cyclic_lr_step_size_up = None
@@ -193,6 +196,11 @@ class TrainingParameters:
                 self.lora_dropout = 0.0
             self.lora_bias = 'lora_bias' in yaml_root.keys()
             self.lora_algo = yaml_root['lora_algo'] # locon, lora, loha, lokr, dylora, glora, full, diag-oft, boft
+
+            # peft casts the adapters to float32 for numerical stability. Keeping them in
+            # bfloat16 halves what dora has to materialize to compute its weight norm, which is
+            # what makes dora fit at all on a small card
+            self.lora_adapter_bf16 = 'lora_adapter_bf16' in yaml_root.keys()
 
             self.lora_use_rslora = 'lora_use_rslora' in yaml_root.keys()
             self.lora_use_dora = 'lora_use_dora' in yaml_root.keys()
