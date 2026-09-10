@@ -71,7 +71,7 @@ class Model:
             self.get_timesteps = get_timesteps_from_list
 
         # each gpu should have the same number of shards
-        if self.params.dreambooth_dataset_folder == None:
+        if self.params.dreambooth_instance_tar == None:
             if self.params.num_shards >= self.num_processes:
                 num_shards_per_gpu = self.params.num_shards // self.num_processes
 
@@ -169,28 +169,30 @@ class Model:
         else:
             self.logger = None
         
-        if params.dreambooth_dataset_folder != None:
+        if params.dreambooth_instance_tar != None:
+            # the dual gpu iterator reads a single stream of shards, it cannot alternate the
+            # instance and the class batches
+            if params.dual_gpu:
+                raise ValueError('dreambooth cannot be combined with dual_gpu')
             shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
             self.sampler = BucketSamplerDreambooth(
-                params.dreambooth_dataset_folder,
+                params.dreambooth_instance_tar,
                 params.dreambooth_regularization_folder,
                 params.dreambooth_instance,
                 params.dreambooth_class,
-                params.dreambooth_num_repeats,
-                params.dreambooth_lambda,
                 self.accelerator,
                 params.batch_size,
                 params.vae_max_batch_size,
                 params.text_encoder_max_batch_size,
                 self,
                 params.dataset_seed,
-                cache_size=4 * params.dreambooth_num_repeats * params.dreambooth_num_regularisation_passes,
+                cache_size=4,
                 r2_access_key=self.params.r2_access_key,
                 r2_bucket_name=self.params.r2_bucket_name,
                 r2_endpoint=self.params.r2_endpoint,
                 r2_secret_key=self.params.r2_secret_key,
                 shards=shards,
-                dreambooth_num_regularisation_passes=params.dreambooth_num_regularisation_passes
+                dreambooth_reg_tar=params.dreambooth_reg_tar,
             )
         elif params.compute_features == False:
             shards = [f'shard-{shard_index:06d}.tar' for shard_index in range(self.shard_index_begin, self.shard_index_end)]
@@ -374,7 +376,10 @@ class Model:
                         min_loss_idx = torch.argmin(torch.stack(losses))
                         generator.set_state(states[min_loss_idx])
                     loss = self.optimize(ratio, latents, embeddings, repa_features, generator)
-                    
+
+                    # dreambooth alternates instance and class batches, only the instance loss is weighted
+                    if batch.is_regularization == False:
+                        loss = loss * self.params.dreambooth_lambda
 
                     #if self.params.use_repa:
                         #loss = loss + self.params.repa_lambda * self.repa_loss(batch)

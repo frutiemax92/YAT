@@ -204,9 +204,7 @@ class TrainingParameters:
 
             self.lora_use_rslora = 'lora_use_rslora' in yaml_root.keys()
             self.lora_use_dora = 'lora_use_dora' in yaml_root.keys()
-            self.dreambooth_lambda = float(yaml_root['dreambooth_lambda']) if 'dreambooth_lambda' in yaml_root.keys() else 1.0
-            self.dreambooth_num_regularisation_passes = int(yaml_root['dreambooth_num_regularisation_passes']) if 'dreambooth_num_regularisation_passes' in yaml_root.keys() else 1
-        
+
         self.fourierft_alpha = float(yaml_root['fourierft_alpha']) if 'fourierft_alpha' in yaml_root.keys() else 0.01
         self.low_vram = 'low_vram' in yaml_root.keys()
         self.use_calculated_features = 'use_calculated_features' in yaml_root.keys()
@@ -233,13 +231,19 @@ class TrainingParameters:
         self.aspect_ratios = int(yaml_root['aspect_ratio']) if 'aspect_ratio' in yaml_root.keys() else None
 
         # for training simple dreambooth loras
-        self.dreambooth_dataset_folder = None
         if 'dreambooth_dataset_folder' in yaml_root.keys():
-            self.dreambooth_dataset_folder = yaml_root['dreambooth_dataset_folder']
-        self.dreambooth_num_repeats = int(yaml_root['dreambooth_num_repeats']) if 'dreambooth_num_repeats' in yaml_root.keys() else 1
+            # ignoring it would silently turn the run into a regular training on the dataset shards
+            raise ValueError('dreambooth_dataset_folder was renamed to dreambooth_instance_tar')
+        self.dreambooth_instance_tar = yaml_root['dreambooth_instance_tar'] if 'dreambooth_instance_tar' in yaml_root.keys() else None
+        # the weight of the loss of the instance batches, the class batches are left unweighted
+        self.dreambooth_lambda = float(yaml_root['dreambooth_lambda']) if 'dreambooth_lambda' in yaml_root.keys() else 1.0
         self.dreambooth_instance = yaml_root['dreambooth_instance'] if 'dreambooth_instance' in yaml_root.keys() else None
         self.dreambooth_class = yaml_root['dreambooth_class'] if 'dreambooth_class' in yaml_root.keys() else None
         self.dreambooth_regularization_folder = yaml_root['dreambooth_regularization_folder'] if 'dreambooth_regularization_folder' in yaml_root.keys() else None
+        # a single local tar holding the regularization images, takes precedence over dreambooth_regularization_folder
+        self.dreambooth_reg_tar = yaml_root['dreambooth_reg_tar'] if 'dreambooth_reg_tar' in yaml_root.keys() else None
+        if self.dreambooth_instance_tar != None and self.dreambooth_reg_tar == None and self.dreambooth_regularization_folder == None:
+            raise ValueError('a dreambooth training needs dreambooth_reg_tar or dreambooth_regularization_folder')
 
         # exploration steps
         if 'exploration_steps' in yaml_root.keys():

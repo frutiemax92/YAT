@@ -1,6 +1,7 @@
 from tqdm import tqdm
 from torch.utils.data import BatchSampler, IterableDataset
 import random
+import itertools
 from copy import copy
 import torch
 from accelerate import Accelerator
@@ -37,6 +38,8 @@ class Batch:
         self.ratio = None
         self.repa_spatial_dims = None  # (height, width) of repa token grid
         self.proj_spatial_dims = None  # (height, width) of proj token grid
+        # dreambooth only: True for a class batch, False for an instance batch
+        self.is_regularization = None
 
 
 class BucketSampler:
@@ -203,6 +206,60 @@ class BucketSampler:
     def remove_shard(self, to_remove : mp.Queue, local_shard_path):
         to_remove.put(local_shard_path)
     
+    def ready_batches(self, buckets):
+        """Yield a batch for every bucket that holds batch_size samples on every process.
+
+        The bucket sizes are gathered, so every process has to call this in lockstep.
+        """
+        # this should be deterministic across all processes...
+        for key in buckets.keys():
+            num_samples = torch.tensor(len(buckets[key]), dtype=torch.int64, device=self.accelerator.device)
+            num_samples = self.accelerator.gather(num_samples)
+
+            is_ok = torch.min(num_samples) >= self.batch_size
+            is_ok = bool(is_ok.item())
+
+            #self.accelerator.wait_for_everyone()
+            if is_ok:
+                # consume batch_size samples for the current bucket
+                closest_ratio = key
+                batch = ([buckets[closest_ratio][i][0] for i in range(self.batch_size)],
+                        [buckets[closest_ratio][i][1] for i in range(self.batch_size)])
+
+                # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
+                # as extracting features tends to use more VRAM than actually training the model
+                # we freeze the vae and text encoder model
+                ratio = self.get_ratio_from_key(closest_ratio)
+
+                gc.collect()
+                torch.cuda.empty_cache()
+                vae_features, embeddings, repa_features = self.extract_features(batch, ratio)
+
+                batch = Batch()
+                batch.ratio = ratio
+                batch.embeddings = embeddings
+                batch.vae_features = vae_features
+                if self.use_repa:
+                    batch.repa_features = repa_features
+                    # REPA tokens from DINO on 224x224 are always 16x16 (256 tokens)
+                    batch.repa_spatial_dims = (16, 16)
+                    # Proj token spatial dims will be set by the model based on image size
+                    # For now store aspect ratio dimensions
+                    aspect_ratio = self.model.aspect_ratios[str(ratio)]
+                    target_height = int(aspect_ratio[0])
+                    target_width = int(aspect_ratio[1])
+                    # Assuming 32x32 patch size, so divide by 32
+                    patch_size = getattr(self.model, 'patch_size', 16)
+                    batch.proj_spatial_dims = (target_height // patch_size, target_width // patch_size)
+
+                yield batch
+                buckets[closest_ratio].clear()
+
+                del batch
+                del vae_features
+                del embeddings
+                gc.collect()
+
     def __iter__(self):
         sync_counter = 0
         
@@ -233,55 +290,8 @@ class BucketSampler:
                 self.accelerator.wait_for_everyone()
 
                 # consume all the accumulated samples in the buckets
-                # this should be deterministic across all processes...
-                for key in self.buckets.keys():
-                    num_samples = torch.tensor(len(self.buckets[key]), dtype=torch.int64, device=self.accelerator.device)
-                    num_samples = self.accelerator.gather(num_samples)
-                    
-                    is_ok = torch.min(num_samples) >= self.batch_size
-                    is_ok = bool(is_ok.item())
-                    
-                    #self.accelerator.wait_for_everyone()
-                    if is_ok:
-                        # consume batch_size samples for the current bucket
-                        closest_ratio = key
-                        batch = ([self.buckets[closest_ratio][i][0] for i in range(self.batch_size)],
-                                [self.buckets[closest_ratio][i][1] for i in range(self.batch_size)])
-                        
-                        # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
-                        # as extracting features tends to use more VRAM than actually training the model
-                        # we freeze the vae and text encoder model
-                        ratio = self.get_ratio_from_key(closest_ratio)
+                yield from self.ready_batches(self.buckets)
 
-                        gc.collect()
-                        torch.cuda.empty_cache()
-                        vae_features, embeddings, repa_features = self.extract_features(batch, ratio)
-
-                        batch = Batch()
-                        batch.ratio = ratio
-                        batch.embeddings = embeddings
-                        batch.vae_features = vae_features
-                        if self.use_repa:
-                            batch.repa_features = repa_features
-                            # REPA tokens from DINO on 224x224 are always 16x16 (256 tokens)
-                            batch.repa_spatial_dims = (16, 16)
-                            # Proj token spatial dims will be set by the model based on image size
-                            # For now store aspect ratio dimensions
-                            aspect_ratio = self.model.aspect_ratios[str(ratio)]
-                            target_height = int(aspect_ratio[0])
-                            target_width = int(aspect_ratio[1])
-                            # Assuming 32x32 patch size, so divide by 32
-                            patch_size = getattr(self.model, 'patch_size', 16)
-                            batch.proj_spatial_dims = (target_height // patch_size, target_width // patch_size)
-                        
-                        yield batch
-                        self.buckets[closest_ratio].clear()
-
-                        del batch
-                        del vae_features
-                        del embeddings
-                        gc.collect()
-                        
             self.remove_shard(to_remove, local_shard_path)
 
 class BucketSamplerExtractFeatures(BucketSampler):
@@ -409,13 +419,19 @@ class BucketSamplerExtractFeatures(BucketSampler):
         ])
 
 class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
+    """Alternates an instance batch and a class batch, as in the dreambooth paper.
+
+    The two streams are bucketed apart, so a batch never mixes instance and class images. The
+    instance images are cycled over for as long as the training runs, the class images come from
+    dreambooth_reg_tar when it is set, otherwise from the regularization folder or from the dataset
+    shards. Every batch carries is_regularization, which the trainer uses to weight the instance
+    loss by dreambooth_lambda.
+    """
     def __init__(self,
-                 dreambooth_dataset_folder : str,
+                 dreambooth_instance_tar : str,
                  dreambooth_regularization_folder : str,
                  dreambooth_instance : str,
                  dreambooth_class : str,
-                 dreambooth_num_repeats : int,
-                 dreambooth_lambda : float,
                  accelerator : Accelerator,
                  batch_size : int,
                  vae_max_batch_size : int,
@@ -429,7 +445,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
                  r2_endpoint : str = None,
                  r2_bucket_name : str = None,
                  shards : list[str] = None,
-                 dreambooth_num_regularisation_passes = 1,
+                 dreambooth_reg_tar : str = None,
         ):
         super().__init__(
             shards,
@@ -450,141 +466,57 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
             use_repa=False,
             local_temp_dir=local_temp_dir,
         )
-        self.dreambooth_dataset_folder = dreambooth_dataset_folder
+        self.dreambooth_instance_tar = dreambooth_instance_tar
         self.dreambooth_regularization_folder = dreambooth_regularization_folder
+        self.dreambooth_reg_tar = dreambooth_reg_tar
         self.dreambooth_instance = dreambooth_instance
         self.dreambooth_class = dreambooth_class
-        self.dreambooth_lambda = dreambooth_lambda
-        self.dreambooth_num_repeats = dreambooth_num_repeats
-        self.dreambooth_num_regularisation_passes = dreambooth_num_regularisation_passes
-        self.reg_shard = False
 
-        # 'alternate' is the training behaviour: instance images, then regularization shards, on
-        # repeat. The precompute pass instead runs one phase of each, so the instance images are
-        # encoded once no matter how many times the training repeats them.
+        # 'alternate' is the training behaviour: an instance batch, then a class batch, on repeat.
+        # The precompute pass asks for one stream at a time instead, and reads the instance images
+        # only once: the replay cycles over them from the cache.
         self.mode = 'alternate'
 
-        # this is a hack to reuse the existing code!
-        def queue_regularization_shards(to_train : mp.Queue):
-            """Queue one round of regularization shards, from the bucket or from a local folder."""
+        def download_shard_worker(process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
+            # only the class images go through here, the instance images and dreambooth_reg_tar are
+            # read directly
+            random.seed(self.process_index + self.seed)
             queued = 0
-            for r in range(self.dreambooth_num_regularisation_passes):
-                if self.r2_bucket_name == None:
-                    to_train.put((True, self.dreambooth_regularization_folder))
-                else:
-                    current_shard_index = self.get_next_shard_index()
+            while True:
+                if to_train.qsize() < 4:
+                    # we get the regularization images either from a local folder or a bucket on the cloud
+                    if self.r2_bucket_name == None:
+                        to_train.put(self.dreambooth_regularization_folder)
+                        continue
+
                     dataset_url = get_secured_urls(self.r2_access_key,
                                 self.r2_secret_key,
                                 self.r2_endpoint,
                                 self.r2_bucket_name,
-                                [self.features_path + '/' + self.shards[current_shard_index]]
+                                [self.features_path + '/' + self.shards[self.get_next_shard_index()]]
                                 )[0]
-                    local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{queued}_{time.time()}.tar'
+                    local_shard_path = self.local_temp_dir + f'/shard_{process_index}_{queued}.tar'
                     try:
                         download_tar(dataset_url, local_shard_path)
                     except Exception as error:
                         print(error)
                         continue
-                    to_train.put((True, local_shard_path))
+                    to_train.put(local_shard_path)
                     queued = queued + 1
-            return queued
-
-        def download_shard_worker(process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
-            # one pass over the instance images, then stop: the features only need to be
-            # calculated once, the training repeats them from the cache
-            if self.mode == 'instance':
-                to_train.put((False, self.dreambooth_dataset_folder))
-                to_train.put(None)
-                return
-
-            # regularization images only, for the second phase of the precompute pass
-            if self.mode == 'regularization':
-                while True:
-                    if to_train.qsize() >= 4:
-                        try:
-                            elem = to_remove.get(timeout=1)
-                            if elem:
-                                reg_shard, local_shard_path = elem
-                                if reg_shard and self.r2_bucket_name != None:
-                                    self.cleanup_shard(local_shard_path)
-                        except:
-                            pass
-                        continue
-                    queue_regularization_shards(to_train)
-
-            current_item = 0
-            local_files = 0
-            while True:
-                if to_train.qsize() >= 4:
-                    # don't run ahead of the training, and clean up the shards it is done with.
-                    # only the shards we downloaded ourselves get deleted, never a local folder
-                    # the user pointed us at
-                    try:
-                        elem = to_remove.get(timeout=1)
-                        if elem:
-                            reg_shard, local_shard_path = elem
-                            if reg_shard and self.r2_bucket_name != None:
-                                self.cleanup_shard(local_shard_path)
-                                local_files = local_files - 1
-                    except:
-                        pass
                     continue
 
-                if current_item % 2 == 0:
-                    for r in range(self.dreambooth_num_repeats):
-                        to_train.put((False, self.dreambooth_dataset_folder))
-                    current_item = current_item + 1
-                    continue
-                elif local_files < 10:
-                    # we get the regularization images either from a local folder or a bucket on the cloud
-                    for r in range(self.dreambooth_num_regularisation_passes):
-                        if self.r2_bucket_name == None:
-                            to_train.put((True, self.dreambooth_regularization_folder))
-                        else:
-                            current_shard_index = self.get_next_shard_index()
-                            dataset_url = get_secured_urls(self.r2_access_key,
-                                        self.r2_secret_key,
-                                        self.r2_endpoint,
-                                        self.r2_bucket_name,
-                                        [self.features_path + '/' + self.shards[current_shard_index]]
-                                        )[0]
-                            local_shard_path = self.local_temp_dir + f'/shard_{self.process_index}_{current_item}.tar'
-                            try:
-                                download_tar(dataset_url, local_shard_path)
-                            except:
-                                current_shard_index = self.get_next_shard_index()
-                                continue
-                            to_train.put((True, local_shard_path))
-                            local_files = local_files + 1
-                    current_item = current_item + 1
-                else:
-                    try:
-                        elem = to_remove.get(timeout=10)
-                        if elem:
-                            reg_shard, local_shard_path = elem
-                            if reg_shard and self.r2_bucket_name != None:
-                                self.cleanup_shard(local_shard_path)
-                                local_files = local_files - 1
-                    except:
-                        pass
+                # don't run ahead of the training, and clean up the shards it is done with. Only the
+                # shards we downloaded ourselves get deleted, never a local folder the user pointed us at
+                try:
+                    local_shard_path = to_remove.get(timeout=1)
+                    if self.r2_bucket_name != None:
+                        self.cleanup_shard(local_shard_path)
+                except Empty:
+                    pass
 
         self.download_shard_proc = download_shard_worker
 
-    def get_invalid_bucket(self):
-        return [(-1.0, -1.0)]
-    
-    def get_local_shard_path(self, to_train : mp.Queue):
-        elem = to_train.get()
-        if elem is None:
-            return None
-        is_reg, local_shard_path = elem
-        self.reg_shard = is_reg
-        return local_shard_path
-    
-    def remove_shard(self, to_remove : mp.Queue, local_shard_path):
-        to_remove.put((self.reg_shard, local_shard_path))
-
-    def process_element(self, elem):
+    def add_element(self, buckets, elem, is_regularization):
         if 'jpg' in elem.keys():
             img = elem['jpg']
         elif 'jpeg' in elem.keys():
@@ -594,15 +526,77 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
 
         if 'txt' in elem.keys():
             caption = elem['txt']
-        elif self.reg_shard == True:
+        elif is_regularization:
             caption = self.dreambooth_class
         else:
             caption = self.dreambooth_instance + ' ' + self.dreambooth_class
-        
+
         ratio = img.height / img.width
         ratio = float(ratio)
         ratio = self.find_closest_ratio(ratio)
-        self.buckets[ratio].append((img, caption))
+        buckets[ratio].append((img, caption))
+
+    def shard_batches(self, shard_paths, is_regularization):
+        """Yield the batches of one stream, with buckets of its own."""
+        buckets = {key : [] for key in self.buckets.keys()}
+        for local_shard_path in shard_paths:
+            dataset = (
+                wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None)
+                .shuffle(1000)
+                .decode(self.pt_decoder)
+            )
+
+            num_elements = 0
+            for elem in dataset:
+                self.add_element(buckets, elem, is_regularization)
+                num_elements = num_elements + 1
+
+                self.accelerator.wait_for_everyone()
+                for batch in self.ready_batches(buckets):
+                    batch.is_regularization = is_regularization
+                    yield batch
+
+            # the local tars are cycled over forever, so an empty one would hang the training
+            if num_elements == 0:
+                kind = 'regularization' if is_regularization else 'instance'
+                raise RuntimeError(f'no {kind} images found in {local_shard_path}')
+
+    def regularization_shards(self, to_train : mp.Queue, to_remove : mp.Queue):
+        while True:
+            local_shard_path = to_train.get()
+            yield local_shard_path
+            # shard_batches only asks for the next shard once it is done with this one
+            to_remove.put(local_shard_path)
+
+    def __iter__(self):
+        if self.mode == 'instance':
+            # one pass over the instance images: the features only need to be calculated once
+            yield from self.shard_batches([self.dreambooth_instance_tar], False)
+            return
+
+        if self.dreambooth_reg_tar != None:
+            # a single local tar, nothing to download: the precompute pass reads it once at most,
+            # the training cycles over it like the instance images
+            if self.mode == 'regularization':
+                regularization = self.shard_batches([self.dreambooth_reg_tar], True)
+            else:
+                regularization = self.shard_batches(itertools.repeat(self.dreambooth_reg_tar), True)
+        else:
+            to_train = mp.Queue()
+            to_remove = mp.Queue()
+            p = mp.Process(target=self.download_shard_proc, args=(self.process_index, to_train, to_remove))
+            p.start()
+            self.download_process = p
+            regularization = self.shard_batches(self.regularization_shards(to_train, to_remove), True)
+
+        if self.mode == 'regularization':
+            yield from regularization
+            return
+
+        instance = self.shard_batches(itertools.repeat(self.dreambooth_instance_tar), False)
+        while True:
+            yield next(instance)
+            yield next(regularization)
 
     def find_closest_key(self, ratio):
         error = 1000

@@ -130,16 +130,18 @@ let go, which is the quickest way to see what is actually taking the memory.
     precomputed_features/instance/rank0, rank1, ...
     precomputed_features/regularization/rank0, rank1, ...
 
-The instance images are encoded **once**, whatever `dreambooth_num_repeats` says: repeating them is
-the training's job, and it replays the same cached features. The regularization pool is filled from
-the shards of `r2_dataset_folder` until `precompute_size` samples have been written. An epoch is then
-the instance pool repeated `dreambooth_num_repeats` times, shuffled at every repeat, followed by the
-regularization pool, which is the order the live dreambooth sampler produces.
+The instance images are encoded **once**: cycling over them is the training's job, and it replays
+the same cached features. The regularization pool is filled from `dreambooth_reg_tar`, or from the
+shards of `dreambooth_regularization_folder`, until `precompute_size` samples have been written; a
+`dreambooth_reg_tar` holding fewer images than that is encoded once, whole. The training then takes
+one batch of each pool in
+turn, an instance batch and then a class batch, which is the order the live dreambooth sampler
+produces. Each pool is reshuffled every time it runs out, so the small instance pool simply comes
+around more often.
 
-Because the repeats happen at replay, `dreambooth_num_repeats` and
-`dreambooth_num_regularisation_passes` are not part of what makes a cache valid: changing them
-re-uses the same features instead of calculating them again. Changing the datasets, the prompts, the
-batch size or the aspect ratio does invalidate it.
+`dreambooth_lambda` is not part of what makes a cache valid: changing it re-uses the same features
+instead of calculating them again. Changing the datasets, the prompts, the batch size or the aspect
+ratio does invalidate it.
 
 ### LoRA
 
@@ -161,16 +163,22 @@ batch size or the aspect ratio does invalidate it.
 
 ### Dreambooth
 
-Setting `dreambooth_dataset_folder` switches the sampler to the dreambooth one, which alternates
-between the instance images and the regularization images.
+Setting `dreambooth_instance_tar` switches the sampler to the dreambooth one, which strictly
+alternates an instance batch and a class batch:
 
-- `dreambooth_dataset_folder` : the folder or TAR file holding the instance images.
-- `dreambooth_regularization_folder` : the folder holding the regularization images. When `r2_bucket_name` is set, the regularization images are taken from the dataset shards instead.
+    instance batch (diffusion loss * dreambooth_lambda) -> class batch (diffusion loss) -> instance batch -> ...
+
+The instance images are cycled over for as long as the training runs, and the two streams are
+bucketed apart, so a batch never mixes instance and class images. With
+`gradient_accumulation_steps: 2`, every optimizer step sees one batch of each.
+Dreambooth cannot be combined with `dual_gpu`.
+
+- `dreambooth_instance_tar` : the local TAR file holding the instance images. It replaces `dreambooth_dataset_folder`, which is now refused.
+- `dreambooth_reg_tar` : a single local TAR file holding the regularization (class) images, cycled over like the instance images. When set, it is used instead of `dreambooth_regularization_folder`, even if `r2_bucket_name` is set.
+- `dreambooth_regularization_folder` : without `dreambooth_reg_tar`, where the regularization images come from: the shards of that folder in the bucket when `r2_bucket_name` is set, otherwise a local folder. One of the two has to be given.
 - `dreambooth_instance` : the instance prompt, used as the caption of the instance images that have no caption of their own.
 - `dreambooth_class` : the class prompt, used the same way for the regularization images.
-- `dreambooth_num_repeats` : how many times the instance images are repeated between two regularization passes. With `precompute_features` the repeats cost nothing: the features are calculated once and replayed.
-- `dreambooth_num_regularisation_passes` : how many regularization shards are consumed in between. With `1`, the instance images and one regularization shard strictly alternate.
-- `dreambooth_lambda` : the weight of the regularization loss. It is read and passed to the sampler, but it is not applied to the loss at the moment.
+- `dreambooth_lambda` : the weight of the loss of the instance batches, defaults to `1.0`. The loss of the class batches is not weighted.
 
 ### REPA
 

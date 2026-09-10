@@ -18,7 +18,8 @@ class Krea2Model(Model):
 
         # a previous precompute pass left every embedding the training and the validation need on
         # disk, so the Qwen3-VL text encoder is dead weight: several gigabytes never loaded at all
-        self.skip_text_encoder = precomputed_prompts_available(params, self.accelerator.process_index)
+        self.skip_text_encoder = precomputed_prompts_available(params, self.accelerator.process_index,
+                                                               self.accelerator.num_processes)
         if self.skip_text_encoder:
             print('using the precomputed prompt embeddings, the text encoder is not loaded')
         text_encoder_kwargs = {'text_encoder': None} if self.skip_text_encoder else {}

@@ -171,17 +171,16 @@ class PrecomputedBucketSampler:
 
     Batches keep the index they were written with, and every process shuffles those indices with
     the same seed. Since the writer produced batch i with the same aspect ratio on every process,
-    the ratios stay in lockstep across processes without any collective communication.
+    the ratios stay in lockstep across processes without any collective communication. Within a
+    ratio, each process then picks its own order, so the gpus don't replay the images in step.
     """
 
-    def __init__(self, cache_dir, accelerator, seed, use_repa=False, model=None,
-                 pools=None, num_repeats=1):
+    def __init__(self, cache_dir, accelerator, seed, use_repa=False, model=None, pools=None):
         self.cache_dir = cache_dir
         self.accelerator = accelerator
         self.seed = seed
         self.use_repa = use_repa
         self.model = model
-        self.num_repeats = max(1, num_repeats)
 
         # a plain run has a single pool, a dreambooth one has the instance images and the
         # regularization images kept apart so each is only calculated once
@@ -193,6 +192,9 @@ class PrecomputedBucketSampler:
             manifest = read_manifest(directory)
             if manifest is None:
                 raise RuntimeError(f'no precomputed features found in {directory}')
+            # the pools are cycled over forever, an empty one would never yield anything
+            if len(manifest['batches']) == 0:
+                raise RuntimeError(f'the precomputed features in {directory} hold no batch')
             self.directories[pool] = directory
             self.pool_batches[pool] = manifest['batches']
 
@@ -226,6 +228,9 @@ class PrecomputedBucketSampler:
         batch.ratio = entry['ratio']
         batch.vae_features = torch.stack(latents)
         batch.embeddings = embeddings
+        # dreambooth: the trainer weights the loss of the instance batches by dreambooth_lambda
+        if pool != None:
+            batch.is_regularization = pool == REGULARIZATION_POOL
         if self.use_repa and len(repa_features) > 0:
             batch.repa_features = torch.stack(repa_features)
             # same convention as BucketSampler: DINO on 224x224 always gives a 16x16 token grid
@@ -235,30 +240,42 @@ class PrecomputedBucketSampler:
             batch.proj_spatial_dims = (int(aspect_ratio[0]) // patch_size, int(aspect_ratio[1]) // patch_size)
         return batch
 
-    def epoch_order(self, epoch):
-        """The (pool, index) pairs one epoch is made of.
+    def pool_order(self, pool):
+        """The batch indices of one pool, forever, reshuffled every time the pool runs out.
 
-        A dreambooth epoch is the instance images repeated dreambooth_num_repeats times, then the
-        regularization pool, which is the order the dreambooth sampler produces live. The repeats
-        cost nothing here: the same cached features are replayed.
+        Every process goes through the same sequence of aspect ratios, but the batches of a given
+        ratio come in an order of their own on each process, redrawn every epoch: the gpus see the
+        images in different orders, and don't pair up the same way twice.
         """
-        # the same seed on every process keeps the ratio of batch i identical across processes
-        rng = random.Random(self.seed + epoch)
-        order = []
-        for pool in self.pools:
-            indices = list(range(len(self.pool_batches[pool])))
-            repeats = self.num_repeats if pool == INSTANCE_POOL else 1
-            for _ in range(repeats):
-                rng.shuffle(indices)
-                order.extend((pool, index) for index in indices)
-        return order
-
-    def __iter__(self):
+        batches = self.pool_batches[pool]
+        rank = self.accelerator.process_index
         epoch = 0
         while True:
-            for pool, batch_index in self.epoch_order(epoch):
-                yield self.load_batch(batch_index, pool)
+            # the same seed on every process keeps the ratio of batch i identical across processes
+            rng = random.Random(self.seed + epoch)
+            indices = list(range(len(batches)))
+            rng.shuffle(indices)
+
+            # then each process shuffles the batches of each ratio among themselves
+            rank_rng = random.Random(f'{self.seed}-{epoch}-{rank}')
+            by_ratio = {}
+            for index in indices:
+                by_ratio.setdefault(batches[index]['ratio'], []).append(index)
+            for group in by_ratio.values():
+                rank_rng.shuffle(group)
+            groups = {ratio: iter(group) for ratio, group in by_ratio.items()}
+            for index in indices:
+                yield next(groups[batches[index]['ratio']])
             epoch = epoch + 1
+
+    def __iter__(self):
+        # a dreambooth run takes one batch of each pool in turn: an instance batch, then a class
+        # batch, which is the order the dreambooth sampler produces live. The small instance pool
+        # simply comes around more often, replaying the same cached features.
+        orders = [self.pool_order(pool) for pool in self.pools]
+        while True:
+            for pool, order in zip(self.pools, orders):
+                yield self.load_batch(next(order), pool)
 
 
 PROMPT_EMBEDDINGS_FILE = 'prompt_embeddings.pt'
@@ -268,25 +285,23 @@ def prompt_embeddings_path(cache_dir, process_index):
     return os.path.join(rank_dir(cache_dir, process_index), PROMPT_EMBEDDINGS_FILE)
 
 
-def precomputed_prompts_available(params, process_index):
+def precomputed_prompts_available(params, process_index, num_processes=1):
     """True when a previous run left everything the text encoder would be asked for on disk.
 
     A model can check this before building its pipeline and skip loading the text encoder
-    altogether, which is the difference between fitting on a small card and not.
+    altogether, which is the difference between fitting on a small card and not. It has to agree
+    with what the precompute pass will decide, or the pass extracts again without a text encoder.
     """
     if not getattr(params, 'precompute_features', False):
         return False
     if getattr(params, 'precompute_force', False):
         return False
 
-    wanted = max(1, params.precompute_size // params.batch_size)
-    for pool in pools_for(params):
-        manifest = read_manifest(rank_dir(params.precompute_cache_dir, process_index, pool))
-        if manifest is None:
-            return False
-        # the instance pool holds a whole small dataset, not precompute_size samples
-        if len(manifest.get('batches', [])) < (1 if pool == INSTANCE_POOL else wanted):
-            return False
+    # a single process with a stale cache makes every process extract again, this one included
+    for rank in range(num_processes):
+        for pool in pools_for(params):
+            if not pool_is_complete(params, rank, pool):
+                return False
 
     path = prompt_embeddings_path(params.precompute_cache_dir, process_index)
     if not os.path.exists(path):
@@ -312,7 +327,7 @@ def rank_dir(cache_dir, process_index, pool=None):
 
 def pools_for(params):
     """The pools a run is made of: one, or the instance/regularization pair for dreambooth."""
-    if getattr(params, 'dreambooth_dataset_folder', None) != None:
+    if getattr(params, 'dreambooth_instance_tar', None) != None:
         return [INSTANCE_POOL, REGULARIZATION_POOL]
     return [None]
 
@@ -326,6 +341,50 @@ def read_manifest(directory):
             return json.load(f)
     except Exception:
         return None
+
+
+def manifest_is_full(manifest, pool, num_batches):
+    """True when a pool holds num_batches batches, or everything its source had to give."""
+    batches = len(manifest.get('batches', []))
+    # the instance pool holds a whole small dataset, not precompute_size samples, and so does a
+    # regularization pool read from a dreambooth_reg_tar smaller than precompute_size
+    if pool == INSTANCE_POOL or manifest.get('exhausted'):
+        return batches >= 1
+    return batches >= num_batches
+
+
+def cache_signature(params):
+    """Everything that changes what ends up in the pool, so a stale cache is not reused."""
+    signature = {
+        'batch_size': params.batch_size,
+        'use_repa': bool(params.use_repa),
+        'dataset_seed': params.dataset_seed,
+        # this one decides the resolution of the cached latents
+        'aspect_ratios': getattr(params, 'aspect_ratios', None),
+    }
+    if getattr(params, 'dreambooth_instance_tar', None) != None:
+        # dreambooth_lambda is deliberately not part of this: it weights the loss of the cached
+        # features, it doesn't change them, so changing it must not throw the cache away
+        signature['dreambooth'] = {
+            # still under its old name, so the caches written before the rename stay valid
+            'dataset_folder': params.dreambooth_instance_tar,
+            'regularization_folder': params.dreambooth_regularization_folder,
+            'instance': params.dreambooth_instance,
+            'class': params.dreambooth_class,
+        }
+        if getattr(params, 'dreambooth_reg_tar', None) != None:
+            signature['dreambooth']['reg_tar'] = params.dreambooth_reg_tar
+    return signature
+
+
+def pool_is_complete(params, process_index, pool):
+    """True when the pool one process left on disk can be reused as is."""
+    manifest = read_manifest(rank_dir(params.precompute_cache_dir, process_index, pool))
+    if manifest is None:
+        return False
+    if manifest.get('signature') != cache_signature(params):
+        return False
+    return manifest_is_full(manifest, pool, max(1, params.precompute_size // params.batch_size))
 
 
 class FeaturesPrecompute:
@@ -350,28 +409,6 @@ class FeaturesPrecompute:
         self.num_batches = max(1, self.params.precompute_size // self.batch_size)
         self.prompt_cache = PromptEmbeddingCache(self.accelerator.device)
         self.text_encoder_freed = False
-
-    def cache_signature(self):
-        """Everything that changes what ends up in the pool, so a stale cache is not reused."""
-        params = self.params
-        signature = {
-            'batch_size': self.batch_size,
-            'use_repa': bool(params.use_repa),
-            'dataset_seed': params.dataset_seed,
-            # this one decides the resolution of the cached latents
-            'aspect_ratios': getattr(params, 'aspect_ratios', None),
-        }
-        if getattr(params, 'dreambooth_dataset_folder', None) != None:
-            # dreambooth_num_repeats and dreambooth_num_regularisation_passes are deliberately
-            # not part of this: they decide how the cached features are replayed, not what gets
-            # calculated, so changing them must not throw the cache away
-            signature['dreambooth'] = {
-                'dataset_folder': params.dreambooth_dataset_folder,
-                'regularization_folder': params.dreambooth_regularization_folder,
-                'instance': params.dreambooth_instance,
-                'class': params.dreambooth_class,
-            }
-        return signature
 
     def prompt_embeddings_path(self):
         return prompt_embeddings_path(self.cache_dir, self.accelerator.process_index)
@@ -411,14 +448,7 @@ class FeaturesPrecompute:
             pipe.encode_prompt = self.prompt_cache.wrap('encode_prompt', pipe.encode_prompt)
 
     def pool_is_complete(self, pool):
-        manifest = read_manifest(self.pool_dirs[pool])
-        if manifest is None:
-            return False
-        if manifest.get('signature') != self.cache_signature():
-            return False
-        # the instance pool holds the whole (small) dataset, so any of it is the whole of it
-        wanted = 1 if pool == INSTANCE_POOL else self.num_batches
-        return len(manifest.get('batches', [])) >= wanted
+        return pool_is_complete(self.params, self.accelerator.process_index, pool)
 
     def cache_is_complete(self):
         if self.params.precompute_force:
@@ -430,7 +460,7 @@ class FeaturesPrecompute:
                              dtype=torch.int64, device=self.accelerator.device)
         return bool(torch.min(self.accelerator.gather(local)).item() == 1)
 
-    def write_batch(self, manifest_batches, batch_index, batch, pool=None, regularization=None):
+    def write_batch(self, manifest_batches, batch_index, batch, pool=None):
         latents = batch.vae_features
         embeddings = batch.embeddings
         repa_features = batch.repa_features
@@ -455,20 +485,20 @@ class FeaturesPrecompute:
             'emb_per_sample': emb_per_sample,
             'files': files,
         }
-        if regularization is not None:
-            entry['regularization'] = bool(regularization)
         if not emb_per_sample:
             emb_file = f'{batch_index:07d}_emb.pt'
             torch.save(to_cpu(embeddings), os.path.join(self.pool_dirs[pool], emb_file))
             entry['emb_file'] = emb_file
         manifest_batches.append(entry)
 
-    def write_manifest(self, manifest_batches, pool=None):
+    def write_manifest(self, manifest_batches, pool=None, exhausted=False):
         manifest = {
             'batch_size': self.batch_size,
             'use_repa': bool(self.params.use_repa),
-            'signature': self.cache_signature(),
+            'signature': cache_signature(self.params),
             'batches': manifest_batches,
+            # the sampler ran out before the pool was full: there is nothing more to extract
+            'exhausted': exhausted,
         }
         with open(os.path.join(self.pool_dirs[pool], 'manifest.json'), 'w') as f:
             json.dump(manifest, f)
@@ -542,8 +572,7 @@ class FeaturesPrecompute:
                                         self.params.dataset_seed,
                                         use_repa=self.params.use_repa,
                                         model=self.model,
-                                        pools=self.pools,
-                                        num_repeats=getattr(self.params, 'dreambooth_num_repeats', 1))
+                                        pools=self.pools)
 
     def extract_pool(self, sampler, pool):
         """Fill one pool from the sampler.
@@ -571,13 +600,13 @@ class FeaturesPrecompute:
         manifest_batches = []
         pbar = tqdm(total=limit, desc=label, disable=not self.accelerator.is_main_process)
         for batch in sampler:
-            self.write_batch(manifest_batches, len(manifest_batches), batch, pool=pool,
-                             regularization=getattr(sampler, 'reg_shard', None))
+            self.write_batch(manifest_batches, len(manifest_batches), batch, pool=pool)
             pbar.update(1)
             if limit != None and len(manifest_batches) >= limit:
                 break
         pbar.close()
-        self.write_manifest(manifest_batches, pool=pool)
+        exhausted = limit == None or len(manifest_batches) < limit
+        self.write_manifest(manifest_batches, pool=pool, exhausted=exhausted)
         stop_sampler(sampler)
 
         samples = len(manifest_batches) * self.batch_size
