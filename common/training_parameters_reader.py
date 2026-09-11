@@ -235,7 +235,7 @@ class TrainingParameters:
             # ignoring it would silently turn the run into a regular training on the dataset shards
             raise ValueError('dreambooth_dataset_folder was renamed to dreambooth_instance_tar')
         self.dreambooth_instance_tar = yaml_root['dreambooth_instance_tar'] if 'dreambooth_instance_tar' in yaml_root.keys() else None
-        # the weight of the loss of the instance batches, the class batches are left unweighted
+        # the weight of the loss of the class (regularization) batches, the instance batches are left unweighted
         self.dreambooth_lambda = float(yaml_root['dreambooth_lambda']) if 'dreambooth_lambda' in yaml_root.keys() else 1.0
         self.dreambooth_instance = yaml_root['dreambooth_instance'] if 'dreambooth_instance' in yaml_root.keys() else None
         self.dreambooth_class = yaml_root['dreambooth_class'] if 'dreambooth_class' in yaml_root.keys() else None

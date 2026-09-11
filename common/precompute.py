@@ -228,7 +228,7 @@ class PrecomputedBucketSampler:
         batch.ratio = entry['ratio']
         batch.vae_features = torch.stack(latents)
         batch.embeddings = embeddings
-        # dreambooth: the trainer weights the loss of the instance batches by dreambooth_lambda
+        # dreambooth: the trainer weights the loss of the class batches by dreambooth_lambda
         if pool != None:
             batch.is_regularization = pool == REGULARIZATION_POOL
         if self.use_repa and len(repa_features) > 0:
@@ -366,6 +366,8 @@ def cache_signature(params):
         # dreambooth_lambda is deliberately not part of this: it weights the loss of the cached
         # features, it doesn't change them, so changing it must not throw the cache away
         signature['dreambooth'] = {
+            # 2: the pools written before could miss images of the local tars, see keep_leftovers
+            'version': 2,
             # still under its old name, so the caches written before the rename stay valid
             'dataset_folder': params.dreambooth_instance_tar,
             'regularization_folder': params.dreambooth_regularization_folder,

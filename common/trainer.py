@@ -55,6 +55,10 @@ class Model:
         self.process_index = self.accelerator.process_index
         self.num_processes = self.accelerator.num_processes
 
+        # draws the training timesteps and noise. Created once so its state advances from a step to
+        # the next, and seeded apart on every gpu so they don't all train at the same timestep
+        self.noise_generator = torch.Generator().manual_seed(params.dataset_seed + self.process_index)
+
         self.timesteps = [int(timestep) for timestep in params.timesteps]
 
         # check if we have defined some training timesteps
@@ -334,12 +338,45 @@ class Model:
     def save_model(self):
         self.accelerator.unwrap_model(self.model).save_pretrained(f'models/{self.global_step}')
     
+    def batch_loss(self, batch):
+        """The diffusion loss of one batch, nothing backward propagated yet."""
+        params = self.params
+        ratio = batch.ratio
+        latents = batch.vae_features
+        embeddings = batch.embeddings
+        repa_features = batch.repa_features
+
+        # randomly train with the unconditional embedding
+        prob = random.random()
+        if prob < self.params.train_unconditional_prob:
+            # put the embeddings to the empty one
+            for idx in range(len(embeddings)):
+                embeddings[idx] = self.empty_embeddings[0]
+
+        # the timesteps and the noise are drawn from here. A generator made fresh on every batch starts
+        # from the same default seed, which trained every step at the same timestep with the same noise
+        generator = self.noise_generator
+        if params.exploration_steps != None:
+            with torch.no_grad():
+                states = []
+                losses = []
+                for step in range(params.exploration_steps):
+                    states.append(generator.get_state())
+                    loss = self.optimize(ratio, latents, embeddings, repa_features, generator)
+                    losses.append(loss)
+
+            min_loss_idx = torch.argmin(torch.stack(losses))
+            generator.set_state(states[min_loss_idx])
+        return self.optimize(ratio, latents, embeddings, repa_features, generator)
+
     def run(self):
         params = self.params
         self.initialize()
         loss_fn = torch.nn.MSELoss()
         progress_bar = tqdm.tqdm(total=params.steps, desc='Num Steps')
         avg_loss = torch.tensor(0, device=self.accelerator.device)
+        avg_instance_loss = torch.tensor(0.0, device=self.accelerator.device)
+        avg_class_loss = torch.tensor(0.0, device=self.accelerator.device)
 
         # extract empty embedding
         # the precompute pass already did it, back when the text encoder was still loaded
@@ -350,42 +387,36 @@ class Model:
 
         while self.global_step < self.params.steps:
             # then go through the cache items
-            for batch in self.sampler:
-                ratio = batch.ratio
-                latents = batch.vae_features
-                embeddings = batch.embeddings
-                repa_features = batch.repa_features
+            batches = iter(self.sampler)
+            for batch in batches:
                 with self.accelerator.accumulate(self.model):
-                    # randomly train with the unconditional embedding
-                    prob = random.random()
-                    if prob < self.params.train_unconditional_prob:
-                        # put the embeddings to the empty one
-                        for idx in range(len(embeddings)):
-                            embeddings[idx] = self.empty_embeddings[0]
+                    if batch.is_regularization == None:
+                        loss = self.batch_loss(batch)
 
-                    generator = torch.Generator()
-                    if params.exploration_steps != None:
-                        with torch.no_grad():
-                            states = []
-                            losses = []
-                            for step in range(params.exploration_steps):
-                                states.append(generator.get_state())
-                                loss = self.optimize(ratio, latents, embeddings, repa_features, generator)
-                                losses.append(loss)
+                        #if self.params.use_repa:
+                            #loss = loss + self.params.repa_lambda * self.repa_loss(batch)
 
-                        min_loss_idx = torch.argmin(torch.stack(losses))
-                        generator.set_state(states[min_loss_idx])
-                    loss = self.optimize(ratio, latents, embeddings, repa_features, generator)
+                        avg_loss = avg_loss + loss
+                        self.accelerator.backward(loss)
+                    else:
+                        # dreambooth: an instance batch and the class batch the sampler yields right
+                        # after it make a single step, on loss = instance_loss + lambda * class_loss
+                        class_batch = next(batches)
+                        if batch.is_regularization or not class_batch.is_regularization:
+                            raise RuntimeError('the dreambooth sampler must alternate instance and class batches')
 
-                    # dreambooth alternates instance and class batches, only the instance loss is weighted
-                    if batch.is_regularization == False:
-                        loss = loss * self.params.dreambooth_lambda
+                        # one backward pass per batch accumulates exactly the gradient of the sum,
+                        # without holding both graphs in memory at once. The gpus only exchange the
+                        # gradients once, after the second pass
+                        with self.accelerator.no_sync(self.model):
+                            instance_loss = self.batch_loss(batch)
+                            self.accelerator.backward(instance_loss)
+                        class_loss = self.batch_loss(class_batch)
+                        self.accelerator.backward(class_loss * self.params.dreambooth_lambda)
 
-                    #if self.params.use_repa:
-                        #loss = loss + self.params.repa_lambda * self.repa_loss(batch)
-
-                    avg_loss = avg_loss + loss
-                    self.accelerator.backward(loss)
+                        avg_loss = avg_loss + instance_loss.detach() + self.params.dreambooth_lambda * class_loss.detach()
+                        avg_instance_loss = avg_instance_loss + instance_loss.detach()
+                        avg_class_loss = avg_class_loss + class_loss.detach()
 
                     if self.accelerator.sync_gradients:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
@@ -403,9 +434,21 @@ class Model:
                     mean_loss = self.accelerator.gather(avg_loss).mean()
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
 
+                    # dreambooth: both halves of the loss, to see which one is not converging
+                    stream_losses = {}
+                    if self.params.dreambooth_instance_tar != None:
+                        stream_losses = {
+                            'train/instance_loss': self.accelerator.gather(avg_instance_loss).mean(),
+                            'train/class_loss': self.accelerator.gather(avg_class_loss).mean(),
+                        }
+                        avg_instance_loss = torch.tensor(0.0, device=self.accelerator.device)
+                        avg_class_loss = torch.tensor(0.0, device=self.accelerator.device)
+
                     if self.logger != None and self.accelerator.is_main_process:
                         try:
                             self.logger.add_scalar('train/loss', mean_loss.item(), self.global_step)
+                            for name, value in stream_losses.items():
+                                self.logger.add_scalar(name, value.item(), self.global_step)
                             if self.lr_scheduler != None:
                                 last_lr = self.lr_scheduler.get_last_lr()
                                 self.logger.add_scalar('train/lr', last_lr[0], self.global_step)

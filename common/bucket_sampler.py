@@ -206,10 +206,12 @@ class BucketSampler:
     def remove_shard(self, to_remove : mp.Queue, local_shard_path):
         to_remove.put(local_shard_path)
     
-    def ready_batches(self, buckets):
+    def ready_batches(self, buckets, keep_leftovers=False):
         """Yield a batch for every bucket that holds batch_size samples on every process.
 
-        The bucket sizes are gathered, so every process has to call this in lockstep.
+        The bucket sizes are gathered, so every process has to call this in lockstep. A bucket that
+        filled up past batch_size while waiting for the other processes is emptied once its batch
+        is out, unless keep_leftovers is set: then only the samples of the batch are taken out.
         """
         # this should be deterministic across all processes...
         for key in buckets.keys():
@@ -253,7 +255,10 @@ class BucketSampler:
                     batch.proj_spatial_dims = (target_height // patch_size, target_width // patch_size)
 
                 yield batch
-                buckets[closest_ratio].clear()
+                if keep_leftovers:
+                    del buckets[closest_ratio][:self.batch_size]
+                else:
+                    buckets[closest_ratio].clear()
 
                 del batch
                 del vae_features
@@ -424,7 +429,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
     The two streams are bucketed apart, so a batch never mixes instance and class images. The
     instance images are cycled over for as long as the training runs, the class images come from
     dreambooth_reg_tar when it is set, otherwise from the regularization folder or from the dataset
-    shards. Every batch carries is_regularization, which the trainer uses to weight the instance
+    shards. Every batch carries is_regularization, which the trainer uses to weight the class
     loss by dreambooth_lambda.
     """
     def __init__(self,
@@ -536,8 +541,14 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
         ratio = self.find_closest_ratio(ratio)
         buckets[ratio].append((img, caption))
 
-    def shard_batches(self, shard_paths, is_regularization):
-        """Yield the batches of one stream, with buckets of its own."""
+    def shard_batches(self, shard_paths, is_regularization, keep_leftovers=False):
+        """Yield the batches of one stream, with buckets of its own.
+
+        keep_leftovers is for the small local tars: every image of them has to make it into a batch,
+        instead of being dropped when a bucket fills up faster on one process than on the others.
+        The downloaded shards are big and differ between processes, so a bucket could grow without
+        end there: they keep the regular behaviour.
+        """
         buckets = {key : [] for key in self.buckets.keys()}
         for local_shard_path in shard_paths:
             dataset = (
@@ -552,9 +563,20 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
                 num_elements = num_elements + 1
 
                 self.accelerator.wait_for_everyone()
-                for batch in self.ready_batches(buckets):
+                for batch in self.ready_batches(buckets, keep_leftovers):
                     batch.is_regularization = is_regularization
                     yield batch
+
+            if keep_leftovers:
+                # what is left was waiting on the other processes: hand it out before the next pass
+                while True:
+                    ready = False
+                    for batch in self.ready_batches(buckets, keep_leftovers):
+                        ready = True
+                        batch.is_regularization = is_regularization
+                        yield batch
+                    if not ready:
+                        break
 
             # the local tars are cycled over forever, so an empty one would hang the training
             if num_elements == 0:
@@ -571,16 +593,16 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
     def __iter__(self):
         if self.mode == 'instance':
             # one pass over the instance images: the features only need to be calculated once
-            yield from self.shard_batches([self.dreambooth_instance_tar], False)
+            yield from self.shard_batches([self.dreambooth_instance_tar], False, keep_leftovers=True)
             return
 
         if self.dreambooth_reg_tar != None:
             # a single local tar, nothing to download: the precompute pass reads it once at most,
             # the training cycles over it like the instance images
             if self.mode == 'regularization':
-                regularization = self.shard_batches([self.dreambooth_reg_tar], True)
+                regularization = self.shard_batches([self.dreambooth_reg_tar], True, keep_leftovers=True)
             else:
-                regularization = self.shard_batches(itertools.repeat(self.dreambooth_reg_tar), True)
+                regularization = self.shard_batches(itertools.repeat(self.dreambooth_reg_tar), True, keep_leftovers=True)
         else:
             to_train = mp.Queue()
             to_remove = mp.Queue()
@@ -593,7 +615,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
             yield from regularization
             return
 
-        instance = self.shard_batches(itertools.repeat(self.dreambooth_instance_tar), False)
+        instance = self.shard_batches(itertools.repeat(self.dreambooth_instance_tar), False, keep_leftovers=True)
         while True:
             yield next(instance)
             yield next(regularization)

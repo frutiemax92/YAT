@@ -164,13 +164,19 @@ ratio does invalidate it.
 ### Dreambooth
 
 Setting `dreambooth_instance_tar` switches the sampler to the dreambooth one, which strictly
-alternates an instance batch and a class batch:
+alternates an instance batch and a class batch. Every training step takes one of each, and
+optimizes the loss of the dreambooth paper:
 
-    instance batch (diffusion loss * dreambooth_lambda) -> class batch (diffusion loss) -> instance batch -> ...
+    loss = instance_loss + dreambooth_lambda * class_loss
+
+Each batch gets its own backward pass, which accumulates exactly the gradient of that sum without
+holding both graphs in memory at once, and the optimizer steps once. `gradient_accumulation_steps`
+counts those pairs: with `2`, a step is two instance batches and two class batches. Besides
+`train/loss`, the instance and the class losses are logged apart as `train/instance_loss` and
+`train/class_loss`.
 
 The instance images are cycled over for as long as the training runs, and the two streams are
-bucketed apart, so a batch never mixes instance and class images. With
-`gradient_accumulation_steps: 2`, every optimizer step sees one batch of each.
+bucketed apart, so a batch never mixes instance and class images.
 Dreambooth cannot be combined with `dual_gpu`.
 
 - `dreambooth_instance_tar` : the local TAR file holding the instance images. It replaces `dreambooth_dataset_folder`, which is now refused.
@@ -178,7 +184,7 @@ Dreambooth cannot be combined with `dual_gpu`.
 - `dreambooth_regularization_folder` : without `dreambooth_reg_tar`, where the regularization images come from: the shards of that folder in the bucket when `r2_bucket_name` is set, otherwise a local folder. One of the two has to be given.
 - `dreambooth_instance` : the instance prompt, used as the caption of the instance images that have no caption of their own.
 - `dreambooth_class` : the class prompt, used the same way for the regularization images.
-- `dreambooth_lambda` : the weight of the loss of the instance batches, defaults to `1.0`. The loss of the class batches is not weighted.
+- `dreambooth_lambda` : the weight of the prior preservation loss, i.e. the loss of the class (regularization) batches, defaults to `1.0`. The loss of the instance batches is not weighted. This is the λ of the dreambooth paper.
 
 ### REPA
 
