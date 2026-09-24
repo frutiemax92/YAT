@@ -1,3 +1,6 @@
 [submodule "PixelDiT"]
 	path = PixelDiT
 	url = https://github.com/NVlabs/PixelDiT.git
+[submodule "lightweight_controlnet"]
+	path = lightweight_controlnet
+	url = https://github.com/frutiemax92/lightweight_controlnet.git
