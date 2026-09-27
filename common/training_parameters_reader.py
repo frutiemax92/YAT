@@ -2,6 +2,30 @@ import json
 import yaml
 import huggingface_hub
 
+
+def read_flag(yaml_root, key, default=False):
+    """A yaml entry meant as a boolean.
+
+    The configs are read with the BaseLoader, so every scalar comes back as a string: 'True' and
+    'False' are both truthy on their own. Most of the flags of this file are presence based, but a
+    parameter documented as a boolean has to honour 'false' as well.
+    """
+    if key not in yaml_root.keys():
+        return default
+    value = yaml_root[key]
+    if isinstance(value, str):
+        return value.strip().lower() not in ('false', 'no', 'off', '0', '')
+    return bool(value)
+
+
+def read_int(yaml_root, key, default=None):
+    return int(yaml_root[key]) if key in yaml_root.keys() else default
+
+
+def read_float(yaml_root, key, default=None):
+    return float(yaml_root[key]) if key in yaml_root.keys() else default
+
+
 class TrainingParameters:
     def __init__(self):
         self.r2_endpoint = None
@@ -61,6 +85,30 @@ class TrainingParameters:
 
         # from the paper explorative modeling: unlocking a third pretraining axis and end-to-end generation
         self.exploration_steps = None
+
+        # lightweight controlnet: a fourierft style half-spectrum per layer, part of it learned and
+        # part of it written by a projection of the reference image features
+        self.train_lw_controlnet = False
+        self.lw_controlnet_tars = None
+        self.lw_controlnet_pretrained = None
+        self.lw_controlnet_adapter_name = 'default'
+        self.lw_controlnet_reference_model = 'facebook/dinov2-base'
+        self.lw_controlnet_reference_dim = None
+        self.lw_controlnet_target_modules = None
+        self.lw_controlnet_cond_dim = 256
+        self.lw_controlnet_pool_grid = 2
+        self.lw_controlnet_n_frequency = None
+        self.lw_controlnet_frequency_ratio = 0.5
+        self.lw_controlnet_n_reference = None
+        self.lw_controlnet_reference_ratio = 0.25
+        self.lw_controlnet_spectrum_scaling = 1.0
+        self.lw_controlnet_reference_scaling = 1.0
+        self.lw_controlnet_ifft_norm = 'ortho'
+        self.lw_controlnet_random_loc_seed = 777
+        self.lw_controlnet_dtype = 'float32'
+        self.lw_controlnet_dropout_prob = 0.1
+        self.lw_controlnet_freeze_path = False
+        self.lw_controlnet_validation_references = None
 
         # precalculate the vae/text encoder features once at startup, then train without them
         self.precompute_features = False
@@ -248,6 +296,138 @@ class TrainingParameters:
         # exploration steps
         if 'exploration_steps' in yaml_root.keys():
             self.exploration_steps = int(yaml_root['exploration_steps'])
+
+        # lightweight controlnet: a reference image goes through a frozen dinov2, and every
+        # controlled layer gets a fourierft spectrum as long as its output dimension - one block of
+        # it learned, one written by a projection of those features - whose inverse fft is added to
+        # that layer's output. The shards that carry no reference leave the reference block at zero,
+        # which is plain fourierft, so a single run can mix both kinds of tar.
+        self.train_lw_controlnet = read_flag(yaml_root, 'train_lw_controlnet')
+        if self.train_lw_controlnet:
+            # local tars, read in a loop. Without them the usual shard/r2 plumbing is used
+            self.lw_controlnet_tars = yaml_root['lw_controlnet_tars'] if 'lw_controlnet_tars' in yaml_root.keys() else None
+            if isinstance(self.lw_controlnet_tars, str):
+                self.lw_controlnet_tars = [self.lw_controlnet_tars]
+
+            # a directory written by a previous run, to resume from or to finetune
+            self.lw_controlnet_pretrained = yaml_root['lw_controlnet_pretrained'] if 'lw_controlnet_pretrained' in yaml_root.keys() else None
+            self.lw_controlnet_adapter_name = yaml_root['lw_controlnet_adapter_name'] if 'lw_controlnet_adapter_name' in yaml_root.keys() else 'default'
+            if 'lw_controlnet_reference_model' in yaml_root.keys():
+                self.lw_controlnet_reference_model = yaml_root['lw_controlnet_reference_model']
+            self.lw_controlnet_reference_dim = read_int(yaml_root, 'lw_controlnet_reference_dim')
+
+            # which layers get a control path. None means every Linear and Conv2d of the model,
+            # which is what fourierft does; a list is matched on the module name, the way peft
+            # matches its own target_modules. These do not have to be lora layers - the path is a
+            # forward hook on the layer, so it lands on whatever that layer's output is, the lora
+            # included
+            self.lw_controlnet_target_modules = yaml_root['lw_controlnet_target_modules'] if 'lw_controlnet_target_modules' in yaml_root.keys() else None
+
+            # width of the reference summary vector the shared conditioner produces once per step.
+            # It is the whole channel the reference has into the model: every controlled layer reads
+            # it through its own cond_dim x n_reference projection
+            self.lw_controlnet_cond_dim = read_int(yaml_root, 'lw_controlnet_cond_dim', 256)
+
+            # the reference patch field is average pooled onto this many cells per side before being
+            # projected into that vector, so a coarse layout survives instead of only a global mean.
+            # 1 is the plain mean. It does not make the path spatial - the offset it writes is one
+            # number per output channel and lands uniformly over the frame - only more descriptive
+            self.lw_controlnet_pool_grid = read_int(yaml_root, 'lw_controlnet_pool_grid', 2)
+
+            # how many BINS of the half-spectrum each side fills, as a fraction of the bin count
+            # of the layer. Each bin is one complex coefficient, so a fraction f of the bins costs
+            # 2 * f * bins parameters, which is f * out_features - the same size these ratios always
+            # meant, the difference being that every one of those parameters is now independent.
+            # The two sets are disjoint, so the fractions cannot add up to more than 1.
+            # lw_controlnet_n_frequency / lw_controlnet_n_reference override them with an absolute
+            # bin count, which is then clamped per layer so a 320 channel conv stays in range
+            self.lw_controlnet_frequency_ratio = read_float(yaml_root, 'lw_controlnet_frequency_ratio', 0.5)
+            self.lw_controlnet_reference_ratio = read_float(yaml_root, 'lw_controlnet_reference_ratio', 0.25)
+            self.lw_controlnet_n_frequency = read_int(yaml_root, 'lw_controlnet_n_frequency')
+            self.lw_controlnet_n_reference = read_int(yaml_root, 'lw_controlnet_n_reference')
+
+            # the gain each side is written into the spectrum at. 1.0, not the 150 fourierft uses:
+            # with norm='ortho' on a 1d transform the 1/sqrt(N) is cancelled by the ~N/2 bins that
+            # contribute, so the offset already comes out at the scale of the parameters themselves
+            # and there is nothing to compensate for. Fourierft's 150 belongs to a 2d transform whose
+            # fill ratio is ~1e-3; ours is 0.5 to 0.75. At 150 one step at lr 5e-4 moves a layer by
+            # 69% of its own output, which over a few hundred hooked layers is noise.
+            # Both are plain floats at inference too: 0 on the reference one is exactly the model
+            # with no reference image, 0 on both is the base model
+            self.lw_controlnet_spectrum_scaling = read_float(
+                yaml_root, 'lw_controlnet_spectrum_scaling', 1.0)
+            self.lw_controlnet_reference_scaling = read_float(
+                yaml_root, 'lw_controlnet_reference_scaling', 1.0)
+
+            # normalization of that inverse fft: ortho (1/sqrt(n)), backward (1/n, torch's default)
+            # or forward (none). ortho is what lets one scaling cover every width in the model
+            if 'lw_controlnet_ifft_norm' in yaml_root.keys():
+                self.lw_controlnet_ifft_norm = yaml_root['lw_controlnet_ifft_norm']
+
+            # seed the per-layer bin placement is drawn from. Both sets are scattered over individual
+            # bins of one permutation, the way fourierft picks its frequencies, so each reaches every
+            # scale of the spectrum rather than occupying one band of neighbouring frequencies
+            self.lw_controlnet_random_loc_seed = read_int(
+                yaml_root, 'lw_controlnet_random_loc_seed', 777)
+
+            # dtype of the control parameters. The inverse fft itself always runs in float32 - there
+            # is no half precision kernel for it - and these are a few thousand numbers per layer,
+            # so float32 costs nothing worth saving here
+            if 'lw_controlnet_dtype' in yaml_root.keys():
+                self.lw_controlnet_dtype = yaml_root['lw_controlnet_dtype']
+
+            # keys of the cross attention architecture this replaced. Silently ignoring them would
+            # leave a config that reads as if it still said something about the run
+            retired = [key for key in ('lw_controlnet_cond_in_dim', 'lw_controlnet_cond_out_dim',
+                                       'lw_controlnet_attention_heads',
+                                       'lw_controlnet_attention_head_dim',
+                                       'lw_controlnet_reference_scale',
+                                       'lw_controlnet_reference_tokens_per_side',
+                                       'lw_controlnet_resampler_heads',
+                                       'lw_controlnet_spatial_conditioning',
+                                       'lw_controlnet_index_layout')
+                       if key in yaml_root.keys()]
+            if retired:
+                print(f'[Warning] ignoring {", ".join(retired)}: lw_controlnet_index_layout is gone '
+                      f'because the bins are always scattered now, and the reference no longer '
+                      f'reaches the '
+                      f'layers through a cross attention on the lora rank tensor, it is written into '
+                      f'a fourierft spectrum that is added to the layer output. The size knobs are '
+                      f'lw_controlnet_cond_dim, lw_controlnet_reference_ratio and '
+                      f'lw_controlnet_reference_scaling')
+
+            # probability of dropping the reference on a step that has one, so the model also
+            # learns the plain fourierft path and the reference can be guided against at inference
+            self.lw_controlnet_dropout_prob = read_float(yaml_root, 'lw_controlnet_dropout_prob', 0.1)
+
+            # on a batch that carries a reference, freeze everything but the control path. The lora
+            # then learns the subject from the samples that have no reference, and the control path is
+            # the only thing that can account for the reference on the ones that do, instead of the
+            # lora absorbing it. The dropped references, and the shards with no ref/ folder at all,
+            # train the lora as before.
+            #
+            # Unlike under the architecture this replaced, it is safe from step 0: the control path
+            # adds to the layer output directly rather than reaching it through peft's zero
+            # initialized lora_B, so its gradient does not wait on any other weight
+            self.lw_controlnet_freeze_path = read_flag(yaml_root, 'lw_controlnet_freeze_path', False)
+
+            # reference images paired with validation_prompts, cycled over when there are fewer
+            self.lw_controlnet_validation_references = yaml_root['lw_controlnet_validation_references'] if 'lw_controlnet_validation_references' in yaml_root.keys() else None
+            if isinstance(self.lw_controlnet_validation_references, str):
+                self.lw_controlnet_validation_references = [self.lw_controlnet_validation_references]
+
+            # no adapter is needed: the control path hooks the layer, whatever that layer turned
+            # out to be, and the trainer freezes the base model itself when there is no lora to do
+            # it. Leaving lora_rank out is then a control only run - the cheapest form of this, and
+            # the one where the reference is the only thing that can account for anything.
+
+            # the reference images are read from the tars, so the sampler has to be the one that
+            # decodes images and captions rather than precalculated features
+            self.compute_features = True
+            if 'vae_max_batch_size' not in yaml_root.keys():
+                self.vae_max_batch_size = 1
+            if 'text_encoder_max_batch_size' not in yaml_root.keys():
+                self.text_encoder_max_batch_size = 1
 
         # precalculate the vae and text encoder features at startup, write them to disk, then free
         # those models so they don't take vram during the training steps

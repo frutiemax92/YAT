@@ -9,6 +9,7 @@ from torchvision.transforms import PILToTensor
 from diffusers.utils.torch_utils import randn_tensor
 from common.training_parameters_reader import TrainingParameters
 from common.trainer import Model
+from common import lw_controlnet
 from common.features_extractor import FeaturesExtractor
 from utils.compress_caption import compress_caption
 
@@ -92,20 +93,63 @@ class SDXLModel(Model):
         
         self.pipe.unet = self.accelerator.unwrap_model(self.model).eval()
 
-        for embed in tqdm.tqdm(embeds, desc='Generating validation latents'):
+        # lightweight controlnet: one reference per prompt, encoded before the sampling starts so
+        # the frozen dinov2 and the unet never share the vram. None when the run is a plain lora,
+        # or when no validation reference was configured, and the patch then behaves as one.
+        references = self.validation_references()
+        if references != None:
+            self.free_reference_encoder()
+
+        # what the pipeline would default to on its own, and what a run with no reference keeps
+        default_size = getattr(self.pipe, 'default_sample_size', 128) * self.pipe.vae_scale_factor
+
+        def generation_size(reference):
+            """The (height, width) to generate this validation image at.
+
+            A src/ref pair is aligned by construction, so a reference only describes the frame it
+            was drawn for. Both sides of the reference attention carry normalized positions, which
+            is what lets one resolution transfer to another - but it also means a portrait mask
+            generated into a square frame is mapped there by relative position, i.e. stretched by
+            the ratio between the two. Nothing tells the reference path the shape of the output
+            frame, so it cannot compensate, and the validation image then shows a shape the mask
+            never asked for.
+
+            So the size is taken from the reference's own aspect ratio, snapped to the same bucket
+            table the training batches are drawn from. Without a reference there is nothing to align
+            to and the pipeline's own default stands.
+            """
+            if reference is None or self.aspect_ratios is None:
+                return default_size, default_size
+            # ReferenceFeatures carries width / height; the bucket table is keyed on height / width
+            width_over_height = max(float(reference.aspect_ratio.reshape(-1)[0]), 1e-6)
+            height, width = self.aspect_ratios[self.find_closest_ratio(1.0 / width_over_height)]
+            return int(height), int(width)
+
+        for index, embed in enumerate(tqdm.tqdm(embeds, desc='Generating validation latents')):
             prompt_embeds, negative_prompt_embeds, pooled_prompt_embeds, negative_pooled_prompt_embeds = embed
-            latent = self.pipe(
-                negative_prompt=None,
-                prompt_embeds=prompt_embeds.to(device=self.model.device),
-                pooled_prompt_embeds=pooled_prompt_embeds.to(device=self.model.device),
-                negative_prompt_embeds=negative_prompt_embeds.to(device=self.model.device),
-                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds.to(device=self.model.device),
-                guidance_scale=5.0,
-                num_inference_steps=20,
-                generator=generator,
-                output_type='latent',
-                callback_on_step_end=self.validation_step_callback,
-            )[0]
+            reference = references[index] if references != None else None
+            if reference != None:
+                reference = lw_controlnet.features_to(reference, self.accelerator.device)
+
+            height, width = generation_size(reference)
+            # the conditioning is set once for the whole denoising loop, the negative pass of the
+            # pipeline included: dropping the reference there would be reference guidance, which is
+            # a choice of its own and not what the training optimizes
+            with self.reference_context(reference):
+                latent = self.pipe(
+                    negative_prompt=None,
+                    prompt_embeds=prompt_embeds.to(device=self.model.device),
+                    pooled_prompt_embeds=pooled_prompt_embeds.to(device=self.model.device),
+                    negative_prompt_embeds=negative_prompt_embeds.to(device=self.model.device),
+                    negative_pooled_prompt_embeds=negative_pooled_prompt_embeds.to(device=self.model.device),
+                    guidance_scale=5.0,
+                    num_inference_steps=20,
+                    generator=generator,
+                    height=height,
+                    width=width,
+                    output_type='latent',
+                    callback_on_step_end=self.validation_step_callback,
+                )[0]
             latents.append(latent.to(device=self.pipe.vae.device))
 
         idx = 0
@@ -118,7 +162,7 @@ class SDXLModel(Model):
             self.logger.add_image(f'validation/{idx}/{prompt}', pil_to_tensor(image[0]), self.global_step)
             idx = idx + 1
 
-    def optimize(self, ratio, latents, embeddings, repa_features):
+    def optimize(self, ratio, latents, embeddings, repa_features, generator):
         params = self.params
         batch_size = params.batch_size
         self.model.to(self.accelerator.device)

@@ -166,6 +166,17 @@ class PromptEmbeddingCache:
         self.frozen = True
 
 
+def batch_group(entry):
+    """What makes two cached batches interchangeable in the replay order.
+
+    The writer produced batch i with the same aspect ratio on every process, because the buckets
+    are only released when they are full everywhere. The lightweight controlnet buckets the
+    referenced and the plain samples apart, so batch i also carries a reference on every process
+    or on none, and both have to be part of the key for the processes to stay in lockstep.
+    """
+    return (entry['ratio'], bool(entry.get('ref_file')))
+
+
 class PrecomputedBucketSampler:
     """Yields batches of latents/embeddings read back from the precompute cache.
 
@@ -231,6 +242,9 @@ class PrecomputedBucketSampler:
         # dreambooth: the trainer weights the loss of the class batches by dreambooth_lambda
         if pool != None:
             batch.is_regularization = pool == REGULARIZATION_POOL
+        if entry.get('ref_file'):
+            batch.reference_features = torch.load(os.path.join(directory, entry['ref_file']),
+                                                  map_location='cpu', weights_only=False)
         if self.use_repa and len(repa_features) > 0:
             batch.repa_features = torch.stack(repa_features)
             # same convention as BucketSampler: DINO on 224x224 always gives a 16x16 token grid
@@ -260,12 +274,12 @@ class PrecomputedBucketSampler:
             rank_rng = random.Random(f'{self.seed}-{epoch}-{rank}')
             by_ratio = {}
             for index in indices:
-                by_ratio.setdefault(batches[index]['ratio'], []).append(index)
+                by_ratio.setdefault(batch_group(batches[index]), []).append(index)
             for group in by_ratio.values():
                 rank_rng.shuffle(group)
             groups = {ratio: iter(group) for ratio, group in by_ratio.items()}
             for index in indices:
-                yield next(groups[batches[index]['ratio']])
+                yield next(groups[batch_group(batches[index])])
             epoch = epoch + 1
 
     def __iter__(self):
@@ -362,6 +376,13 @@ def cache_signature(params):
         # this one decides the resolution of the cached latents
         'aspect_ratios': getattr(params, 'aspect_ratios', None),
     }
+    if getattr(params, 'train_lw_controlnet', False):
+        # the reference features are cached alongside the latents, so the encoder that produced
+        # them is part of what makes a pool reusable
+        signature['lw_controlnet'] = {
+            'reference_model': params.lw_controlnet_reference_model,
+            'tars': params.lw_controlnet_tars,
+        }
     if getattr(params, 'dreambooth_instance_tar', None) != None:
         # dreambooth_lambda is deliberately not part of this: it weights the loss of the cached
         # features, it doesn't change them, so changing it must not throw the cache away
@@ -487,6 +508,16 @@ class FeaturesPrecompute:
             'emb_per_sample': emb_per_sample,
             'files': files,
         }
+
+        # lightweight controlnet: the grid and the padding mask of a ReferenceFeatures describe the
+        # whole batch, not one sample, so it is kept whole in a file of its own. A batch that came
+        # from a shard without a ref/ folder simply has none, and trains the lora alone.
+        if getattr(batch, 'reference_features', None) is not None:
+            from common.lw_controlnet import features_to
+            ref_file = f'{batch_index:07d}_ref.pt'
+            torch.save(features_to(batch.reference_features, 'cpu'),
+                       os.path.join(self.pool_dirs[pool], ref_file))
+            entry['ref_file'] = ref_file
         if not emb_per_sample:
             emb_file = f'{batch_index:07d}_emb.pt'
             torch.save(to_cpu(embeddings), os.path.join(self.pool_dirs[pool], emb_file))
@@ -560,6 +591,12 @@ class FeaturesPrecompute:
         self.report_memory('before freeing the vae and the text encoder')
         self.free_vae()
 
+        # the reference features of every cached batch are on disk by now, so the frozen dinov2
+        # goes the same way as the vae. The validation rebuilds it if it has a reference to encode.
+        free_reference_encoder = getattr(self.model, 'free_reference_encoder', None)
+        if free_reference_encoder != None:
+            free_reference_encoder()
+
         # only the main process validates, so every other process can drop the text encoder now
         if validation_ready or not self.accelerator.is_main_process:
             self.free_text_encoder()
@@ -589,8 +626,11 @@ class FeaturesPrecompute:
         os.makedirs(directory, exist_ok=True)
 
         # whatever the previous phase left half filled must not leak into this pool
-        for key in getattr(sampler, 'buckets', {}):
-            sampler.buckets[key].clear()
+        if hasattr(sampler, 'reset_buckets'):
+            sampler.reset_buckets()
+        else:
+            for key in getattr(sampler, 'buckets', {}):
+                sampler.buckets[key].clear()
 
         instance = pool == INSTANCE_POOL
         if pool != None:

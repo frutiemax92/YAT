@@ -10,6 +10,7 @@ from common.training_parameters_reader import TrainingParameters
 from common.trainer import Model
 from common.precompute import precomputed_prompts_available
 from common.features_extractor import FeaturesExtractor
+from common import lw_controlnet
 from diffusers.quantizers import PipelineQuantizationConfig
 
 class Krea2Model(Model):
@@ -38,7 +39,8 @@ class Krea2Model(Model):
         transformer_quant_config = None
         if params.lora_base_model_4bit:
             transformer_quant_config = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16
+                load_in_4bit=True, bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_quant_type='nf4'
             )
 
         if params.pretrained_model_path != None:
@@ -72,6 +74,10 @@ class Krea2Model(Model):
 
         # fixed text sequence length consumed by the transformer, matching the pipeline's own default
         self.max_sequence_length = 512
+
+        # the transformer takes 64 channels out of the 16 channel qwen-image latent, which is a 2x2
+        # patchify, so its blocks see a token grid half the size of the latent on each side.
+        self.latent_patch_size = 2
         self.aspect_ratios = ASPECT_RATIO_1024_BIN
 
         self.pipe.vae.to(torch.bfloat16)
@@ -148,36 +154,57 @@ class Krea2Model(Model):
         self.pipe.text_encoder = None
         self.pipe.transformer = self.accelerator.unwrap_model(transformer)
 
+        # lightweight controlnet: one reference per prompt, encoded before the sampling starts so
+        # the frozen dinov2 and the transformer never share the vram. None when the run is a plain
+        # lora, or when no validation reference was configured, and the patch then behaves as one.
+        references = self.validation_references()
+        if references != None:
+            self.free_reference_encoder()
+
         for embed in tqdm.tqdm(embeds, desc='Generating validation images'):
             prompt_embeds, prompt_embeds_mask = embed
-            image = self.pipe(
-                negative_prompt=None,
-                prompt_embeds=prompt_embeds,
-                prompt_embeds_mask=prompt_embeds_mask,
-                negative_prompt_embeds=negative_prompt_embeds,
-                negative_prompt_embeds_mask=negative_prompt_embeds_mask,
-                guidance_scale=4.5,
-                num_inference_steps=28,
-                generator=generator,
-                width=512,
-                height=512,
-            ).images[0]
+            reference = references[idx] if references != None else None
+            if reference != None:
+                reference = lw_controlnet.features_to(reference, self.accelerator.device)
+
+            # the conditioning is set once for the whole denoising loop, the negative pass of the
+            # pipeline included: dropping the reference there would be reference guidance, which is
+            # a choice of its own and not what the training optimizes
+            with self.reference_context(reference):
+                image = self.pipe(
+                    negative_prompt=None,
+                    prompt_embeds=prompt_embeds,
+                    prompt_embeds_mask=prompt_embeds_mask,
+                    negative_prompt_embeds=negative_prompt_embeds,
+                    negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+                    guidance_scale=4.5,
+                    num_inference_steps=28,
+                    generator=generator,
+                    width=512,
+                    height=512,
+                ).images[0]
             self.logger.add_image(f'validation/{idx}/{params.validation_prompts[idx]}', pil_to_tensor(image), self.global_step)
             idx = idx + 1
 
         self.pipe.text_encoder = text_encoder
         self.pipe.transformer = transformer
 
+    def text_sequence_length(self, embeddings):
+        """The padded text length a batch runs at.
+
+        Pad to the longest caption in the batch rather than to the fixed length: the padding tokens
+        go through every text block and the joint attention for nothing. Measured on a 4070, going
+        from a fixed 512 to a typical caption length cuts the step peak by ~1.6 GiB. Rounded up to a
+        multiple of 8 to keep the attention kernels on aligned shapes.
+        """
+        longest = max(emb.shape[0] for emb in embeddings)
+        return min(self.max_sequence_length, ((longest + 7) // 8) * 8)
+
     def optimize(self, ratio, latents, embeddings, repa_tokens, generator: torch.Generator = None):
         params = self.params
         batch_size = params.batch_size
 
-        # pad to the longest caption in the batch rather than to the fixed length: the padding
-        # tokens go through every text block and the joint attention for nothing. Measured on a
-        # 4070, going from a fixed 512 to a typical caption length cuts the step peak by ~1.6 GiB.
-        # rounded up to a multiple of 8 to keep the attention kernels on aligned shapes.
-        longest = max(emb.shape[0] for emb in embeddings)
-        max_sequence_length = min(self.max_sequence_length, ((longest + 7) // 8) * 8)
+        max_sequence_length = self.text_sequence_length(embeddings)
 
         # pad the embeds to that sequence length and generate the corresponding mask
         padded_embeds = []

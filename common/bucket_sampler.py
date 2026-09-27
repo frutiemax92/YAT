@@ -30,6 +30,13 @@ def flush():
     gc.collect()
     torch.cuda.empty_cache()
 
+def decode_image(elem):
+    """The image of a webdataset sample, whatever extension it was stored under."""
+    for extension in ('jpg', 'jpeg', 'png', 'webp'):
+        if extension in elem.keys():
+            return elem[extension]
+    raise KeyError(f'no image in the sample {elem.get("__key__")}, only {sorted(elem.keys())}')
+
 class Batch:
     def __init__(self):
         self.embeddings = None
@@ -40,6 +47,9 @@ class Batch:
         self.proj_spatial_dims = None  # (height, width) of proj token grid
         # dreambooth only: True for a class batch, False for an instance batch
         self.is_regularization = None
+        # lightweight controlnet only: the ReferenceFeatures of the reference images of this
+        # batch, None for a batch that came from a shard without a ref/ folder
+        self.reference_features = None
 
 
 class BucketSampler:
@@ -154,6 +164,19 @@ class BucketSampler:
     def add_bucket(self, ratio):
         self.buckets[ratio] = deque(maxlen=self.batch_size)
 
+    def attach_extras(self, batch, samples, ratio):
+        """Hook for the samplers whose samples carry more than an image and a caption."""
+        pass
+
+    def begin_shard(self):
+        """Hook called before a shard is read, for the state that does not outlive one."""
+        pass
+
+    def reset_buckets(self):
+        """Drop everything half accumulated, so one phase does not leak into the next."""
+        for key in self.buckets:
+            self.buckets[key].clear()
+
     def process_element(self, elem):
         ratio, latent, emb = elem['ratio'], elem['latent.pt'], elem['emb.pt']
         ratio = float(ratio)
@@ -225,8 +248,11 @@ class BucketSampler:
             if is_ok:
                 # consume batch_size samples for the current bucket
                 closest_ratio = key
-                batch = ([buckets[closest_ratio][i][0] for i in range(self.batch_size)],
-                        [buckets[closest_ratio][i][1] for i in range(self.batch_size)])
+                # a sample is (image, caption), plus whatever else the sampler put after it - a
+                # reference image, for the lightweight controlnet - transposed into one list per
+                # field. The first two are what every sampler below reads.
+                samples = [buckets[closest_ratio][i] for i in range(self.batch_size)]
+                batch = tuple(list(column) for column in zip(*samples))
 
                 # now we must extract the text embeddings and vae features, and making sure we don't exceed the vae max batch size
                 # as extracting features tends to use more VRAM than actually training the model
@@ -253,6 +279,8 @@ class BucketSampler:
                     # Assuming 32x32 patch size, so divide by 32
                     patch_size = getattr(self.model, 'patch_size', 16)
                     batch.proj_spatial_dims = (target_height // patch_size, target_width // patch_size)
+
+                self.attach_extras(batch, samples, ratio)
 
                 yield batch
                 if keep_leftovers:
@@ -288,6 +316,7 @@ class BucketSampler:
                 .shuffle(1000)
                 .decode(self.pt_decoder)
             )
+            self.begin_shard()
 
             for elem in dataset:
                 self.process_element(elem)
@@ -348,13 +377,7 @@ class BucketSamplerExtractFeatures(BucketSampler):
         return res
     
     def process_element(self, elem):
-        if 'jpg' in elem.keys():
-            img = elem['jpg']
-        elif 'jpeg' in elem.keys():
-            img = elem['jpeg']
-        else:
-            img = elem['png']
-
+        img = decode_image(elem)
         caption = elem['txt']
         ratio = img.height / img.width
         ratio = float(ratio)
@@ -423,7 +446,154 @@ class BucketSamplerExtractFeatures(BucketSampler):
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         ])
 
-class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
+class ReferencePairing:
+    """Pairs the src/<name> and ref/<name> halves of a lightweight controlnet shard back together.
+
+    webdataset keys a sample by its path minus the extension, so the image and its reference reach
+    the sampler as two separate samples, in whatever order the tar and the shuffle buffer produce
+    them. What is still unmatched when a shard ends was a src without a ref or the other way
+    around, and is dropped by begin_shard.
+
+    Each stream of shards needs a pairing of its own: the instance and the regularization tars of
+    a dreambooth run number their samples the same way, so a shared one would pair the image of
+    one with the reference of the other.
+    """
+    def __init__(self):
+        self.src = {}
+        self.ref = {}
+
+    def clear(self):
+        self.src.clear()
+        self.ref.clear()
+
+    def pair(self, elem):
+        """(image, caption, reference) once a sample is complete, None while it waits for its half.
+
+        A sample outside a src/ or ref/ folder is an ordinary image and caption: it is complete on
+        its own and carries no reference, so it trains the lora alone. The caption comes back as
+        None when the shard holds none, which is what a dreambooth instance tar looks like: the
+        caller fills in the instance prompt.
+        """
+        key = elem.get('__key__', '')
+        caption = elem['txt'] if 'txt' in elem.keys() else None
+
+        if key.startswith('src/'):
+            name = key[len('src/'):]
+            reference = self.ref.pop(name, None)
+            if reference is None:
+                self.src[name] = (decode_image(elem), caption)
+                return None
+            return decode_image(elem), caption, reference
+
+        if key.startswith('ref/'):
+            name = key[len('ref/'):]
+            source = self.src.pop(name, None)
+            if source is None:
+                self.ref[name] = decode_image(elem)
+                return None
+            return source[0], source[1], decode_image(elem)
+
+        return decode_image(elem), caption, None
+
+
+class ReferencePairedSamples:
+    """The bucket layout and the reference encoding of a lightweight controlnet run.
+
+    Mixed into a sampler, it stays inert until setup_reference_pairing is told the run wants a
+    reference path: the bucket keys, the ratio they are read back with and the features attached
+    to a batch all fall back to what the sampler did before.
+
+    With it on, referenced and plain samples are bucketed apart, the bucket key being
+    (ratio, has_reference), so a batch never mixes the two and the reference path is used either
+    by every sample of a step or by none of them.
+    """
+    def setup_reference_pairing(self, train_lw_controlnet):
+        self.train_lw_controlnet = train_lw_controlnet
+        if not train_lw_controlnet:
+            return
+        # ready_batches walks the keys in a fixed order and gathers their counts, so every process
+        # has to hold the same key set
+        self.buckets = {(float(key), has_reference): []
+                        for key in self.model.aspect_ratios.keys()
+                        for has_reference in (0, 1)}
+
+    def new_pairing(self):
+        return ReferencePairing() if self.train_lw_controlnet else None
+
+    def get_ratio_from_key(self, key):
+        return key[0] if self.train_lw_controlnet else key
+
+    def add_sample(self, buckets, image, caption, reference):
+        ratio = self.find_closest_ratio(float(image.height) / image.width)
+        if not self.train_lw_controlnet:
+            buckets[ratio].append((image, caption))
+        elif reference is None:
+            buckets[(ratio, 0)].append((image, caption))
+        else:
+            buckets[(ratio, 1)].append((image, caption, reference))
+
+    def attach_extras(self, batch, samples, ratio):
+        if len(samples[0]) < 3:
+            return
+        batch.reference_features = self.model.encode_reference_images(
+            [sample[2] for sample in samples])
+
+
+class BucketSamplerLwControlNet(ReferencePairedSamples, BucketSamplerExtractFeatures):
+    """Reads the tars of a lightweight controlnet run, with or without a reference image.
+
+    A shard made by create_lw_controlnet_tar.py holds src/<name>.jpg, src/<name>.txt and
+    ref/<name>.jpg, which ReferencePairing puts back together. An ordinary shard, with images and
+    captions at its root and no ref/ folder, is read exactly as it always was and its batches
+    carry no reference - those steps train the lora alone.
+    """
+    def __init__(self, *args, lw_controlnet_tars=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setup_reference_pairing(True)
+        self.pairing = self.new_pairing()
+
+        self.lw_controlnet_tars = lw_controlnet_tars
+        if lw_controlnet_tars:
+            def local_tar_worker(process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
+                """Hands out the local tars in a loop, and never deletes them.
+
+                The inherited local file getter yields a single shard and then exits, which is
+                what the precompute pass wants but would hang a training that keeps asking for
+                more. These tars are the whole dataset, so they are cycled over instead.
+                """
+                rng = random.Random(self.process_index + self.seed)
+                order = list(self.lw_controlnet_tars)
+                while True:
+                    rng.shuffle(order)
+                    for path in order:
+                        if not os.path.exists(path):
+                            print(f'[Warning] {path} does not exist, skipping it')
+                            continue
+                        to_train.put(path)
+                        # the trainer is done with the shard before it asks for the next one
+                        to_remove.get()
+
+            self.download_shard_proc = local_tar_worker
+
+    def reset_buckets(self):
+        super().reset_buckets()
+        self.pairing.clear()
+
+    def begin_shard(self):
+        self.pairing.clear()
+
+    def process_element(self, elem):
+        sample = self.pairing.pair(elem)
+        if sample is None:
+            # the other half of the pair has not come out of the shard yet
+            return
+        image, caption, reference = sample
+        if caption is None:
+            raise KeyError(f'no caption for the sample {elem.get("__key__")}')
+        self.add_sample(self.buckets, image, caption, reference)
+
+
+class BucketSamplerDreambooth(ReferencePairedSamples, BucketSamplerExtractFeatures):
     """Alternates an instance batch and a class batch, as in the dreambooth paper.
 
     The two streams are bucketed apart, so a batch never mixes instance and class images. The
@@ -431,6 +601,12 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
     dreambooth_reg_tar when it is set, otherwise from the regularization folder or from the dataset
     shards. Every batch carries is_regularization, which the trainer uses to weight the class
     loss by dreambooth_lambda.
+
+    With train_lw_controlnet, both streams also read the src/ref layout: an instance tar built by
+    create_lw_controlnet_tar.py trains the reference path on the instance images, and the
+    regularization tar can be either kind - a plain tar of images and captions keeps the prior of
+    the lora alone, a src/ref one also regularizes the reference path. Each stream pairs with its
+    own ReferencePairing, since the two tars number their samples the same way.
     """
     def __init__(self,
                  dreambooth_instance_tar : str,
@@ -451,6 +627,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
                  r2_bucket_name : str = None,
                  shards : list[str] = None,
                  dreambooth_reg_tar : str = None,
+                 train_lw_controlnet : bool = False,
         ):
         super().__init__(
             shards,
@@ -471,6 +648,7 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
             use_repa=False,
             local_temp_dir=local_temp_dir,
         )
+        self.setup_reference_pairing(train_lw_controlnet)
         self.dreambooth_instance_tar = dreambooth_instance_tar
         self.dreambooth_regularization_folder = dreambooth_regularization_folder
         self.dreambooth_reg_tar = dreambooth_reg_tar
@@ -521,25 +699,27 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
 
         self.download_shard_proc = download_shard_worker
 
-    def add_element(self, buckets, elem, is_regularization):
-        if 'jpg' in elem.keys():
-            img = elem['jpg']
-        elif 'jpeg' in elem.keys():
-            img = elem['jpeg']
-        else:
-            img = elem['png']
+    def add_element(self, buckets, pairing, elem, is_regularization):
+        """Put one webdataset sample in its bucket, once it is complete.
 
-        if 'txt' in elem.keys():
-            caption = elem['txt']
-        elif is_regularization:
-            caption = self.dreambooth_class
+        Without a pairing this is the image and the caption of the sample. With one, a src/ half
+        waits for its ref/ half and the sample only lands in a bucket when both are in.
+        """
+        if pairing is None:
+            img, caption, reference = decode_image(elem), elem.get('txt'), None
         else:
-            caption = self.dreambooth_instance + ' ' + self.dreambooth_class
+            sample = pairing.pair(elem)
+            if sample is None:
+                return
+            img, caption, reference = sample
 
-        ratio = img.height / img.width
-        ratio = float(ratio)
-        ratio = self.find_closest_ratio(ratio)
-        buckets[ratio].append((img, caption))
+        # a tar of bare images takes its caption from the prompts of the config. Resolved here and
+        # not before, so a run that captions every image never has to have them set at all.
+        if caption is None:
+            caption = (self.dreambooth_class if is_regularization
+                       else self.dreambooth_instance + ' ' + self.dreambooth_class)
+
+        self.add_sample(buckets, img, caption, reference)
 
     def shard_batches(self, shard_paths, is_regularization, keep_leftovers=False):
         """Yield the batches of one stream, with buckets of its own.
@@ -550,16 +730,20 @@ class BucketSamplerDreambooth(BucketSamplerExtractFeatures):
         end there: they keep the regular behaviour.
         """
         buckets = {key : [] for key in self.buckets.keys()}
+        # the pairing belongs to this stream, and nothing of it survives one shard
+        pairing = self.new_pairing()
         for local_shard_path in shard_paths:
             dataset = (
                 wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None)
                 .shuffle(1000)
                 .decode(self.pt_decoder)
             )
+            if pairing != None:
+                pairing.clear()
 
             num_elements = 0
             for elem in dataset:
-                self.add_element(buckets, elem, is_regularization)
+                self.add_element(buckets, pairing, elem, is_regularization)
                 num_elements = num_elements + 1
 
                 self.accelerator.wait_for_everyone()
