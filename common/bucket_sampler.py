@@ -94,6 +94,11 @@ class BucketSampler:
         # set while iterating, so the shard downloader can be stopped when we stop consuming batches
         self.download_process = None
 
+        # how many downloaded shards can sit on disk at once: the one being read, plus 4 downloaded
+        # ahead so the training never waits on the network. The precompute pass sets this to 1, as
+        # it stops after precompute_size samples and anything downloaded ahead would be thrown away
+        self.max_local_shards = 5
+
         def local_file_getter(process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
             print('using local file getter')
             
@@ -110,9 +115,11 @@ class BucketSampler:
             to_remove : mp.Queue):
             current_item = 0
             num_shards = 0
+            # the shards handed to the trainer that it has not given back yet
+            in_flight = 0
             random.seed(self.process_index + self.seed)
             while True:
-                if to_train.qsize() < 4:
+                if in_flight < self.max_local_shards:
                     current_shard_index = self.get_next_shard_index()
                     dataset_url = get_secured_urls(self.r2_access_key,
                                         self.r2_secret_key,
@@ -129,11 +136,16 @@ class BucketSampler:
                         continue
                     to_train.put(local_shard_path)
                     current_item = current_item + 1
+                    in_flight = in_flight + 1
+                    # keep filling up before waiting on the trainer
+                    if in_flight < self.max_local_shards:
+                        continue
 
                 try:
                     r = to_remove.get(timeout=10)
                     self.cleanup_shard(r)
-                except:
+                    in_flight = in_flight - 1
+                except Empty:
                     pass
         
         if self.local_paths == None:
@@ -665,11 +677,14 @@ class BucketSamplerDreambooth(ReferencePairedSamples, BucketSamplerExtractFeatur
             # read directly
             random.seed(self.process_index + self.seed)
             queued = 0
+            # the shards handed to the trainer that it has not given back yet
+            in_flight = 0
             while True:
-                if to_train.qsize() < 4:
+                if in_flight < self.max_local_shards:
                     # we get the regularization images either from a local folder or a bucket on the cloud
                     if self.r2_bucket_name == None:
                         to_train.put(self.dreambooth_regularization_folder)
+                        in_flight = in_flight + 1
                         continue
 
                     dataset_url = get_secured_urls(self.r2_access_key,
@@ -686,12 +701,14 @@ class BucketSamplerDreambooth(ReferencePairedSamples, BucketSamplerExtractFeatur
                         continue
                     to_train.put(local_shard_path)
                     queued = queued + 1
+                    in_flight = in_flight + 1
                     continue
 
                 # don't run ahead of the training, and clean up the shards it is done with. Only the
                 # shards we downloaded ourselves get deleted, never a local folder the user pointed us at
                 try:
                     local_shard_path = to_remove.get(timeout=1)
+                    in_flight = in_flight - 1
                     if self.r2_bucket_name != None:
                         self.cleanup_shard(local_shard_path)
                 except Empty:

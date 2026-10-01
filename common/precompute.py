@@ -638,7 +638,12 @@ class FeaturesPrecompute:
             sampler.mode = pool
         limit = None if instance else self.num_batches
 
-        label = f'Precomputing {pool} features' if pool else 'Precomputing latents and embeddings'
+        # the pass stops as soon as the pool is full, so a shard downloaded ahead of the one being
+        # read would most likely never be opened: fetch them one at a time instead
+        if hasattr(sampler, 'max_local_shards'):
+            sampler.max_local_shards = 1
+
+        label =f'Precomputing {pool} features' if pool else 'Precomputing latents and embeddings'
         manifest_batches = []
         pbar = tqdm(total=limit, desc=label, disable=not self.accelerator.is_main_process)
         for batch in sampler:
