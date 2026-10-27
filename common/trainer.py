@@ -20,6 +20,7 @@ import math
 import contextlib
 from common.repa import RepaModel, RepaConfig
 from common.precompute import FeaturesPrecompute
+from common.peft_bnb_patch import patch_lycoris_for_bnb_4bit
 from common import lw_controlnet
 from accelerate.utils import InitProcessGroupKwargs, DistributedDataParallelKwargs
 from datetime import timedelta
@@ -351,6 +352,7 @@ class Model:
 
         # check for lora training
         if self.params.lora_rank != None:
+            patch_lycoris_for_bnb_4bit()
             dtype = self.model.dtype
             if self.params.lora_pretrained == None:
                 if params.lora_algo == 'lora':

@@ -4,3 +4,6 @@
 [submodule "lightweight_controlnet"]
 	path = lightweight_controlnet
 	url = https://github.com/frutiemax92/lightweight_controlnet.git
+[submodule "fourierft"]
+	path = fourierft
+	url = https://github.com/frutiemax92/fourierft.git
