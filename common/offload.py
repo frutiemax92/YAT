@@ -10,9 +10,14 @@ def _is_block_list(module):
         sum(p.numel() for p in child.parameters()) > 1_000_000 for child in module)
 
 
+# the norm weights and the like: streaming them saves nothing, and an unquantized one is saved by the autograd
+# graph for the backward, which finds it back on the cpu when the hook of the block has already offloaded it
+MIN_OFFLOADED_NUMEL = 1_000_000
+
+
 def _frozen_tensors(block):
     for tensor in list(block.parameters()) + list(block.buffers()):
-        if not tensor.requires_grad:
+        if not tensor.requires_grad and tensor.numel() >= MIN_OFFLOADED_NUMEL:
             yield tensor
 
 
