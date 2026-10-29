@@ -544,7 +544,9 @@ class FeaturesPrecompute:
         # to the vae and the text encoder for the duration
         cache_ready = self.all_processes_have_cache()
         moved_to_cpu = False
-        if not cache_ready:
+        # with offload_to_cpu the model is not parked: the bf16 one is already on the cpu, and the 4 bit one
+        # would lose its quantization state on the round trip
+        if not cache_ready and not self.params.offload_to_cpu:
             moved_to_cpu = self.move_model_to_cpu()
             self.report_memory('with the model parked on the cpu')
 
@@ -602,7 +604,9 @@ class FeaturesPrecompute:
             self.free_text_encoder()
 
         # now that they are gone there is room for the model again
-        if moved_to_cpu:
+        # with offload_to_cpu the model is meant to stay in cpu memory: the trainer streams its blocks
+        # to the gpu one at a time, so putting all of it back here is what ran out of vram
+        if moved_to_cpu and not self.params.offload_to_cpu:
             self.model.model.to(self.accelerator.device)
         self.report_memory('after freeing them, model back on the gpu')
 
@@ -646,6 +650,7 @@ class FeaturesPrecompute:
         label =f'Precomputing {pool} features' if pool else 'Precomputing latents and embeddings'
         manifest_batches = []
         pbar = tqdm(total=limit, desc=label, disable=not self.accelerator.is_main_process)
+        sampler.keep_leftovers = True
         for batch in sampler:
             self.write_batch(manifest_batches, len(manifest_batches), batch, pool=pool)
             pbar.update(1)

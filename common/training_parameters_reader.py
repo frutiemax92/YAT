@@ -52,6 +52,9 @@ class TrainingParameters:
         self.lora_base_model_8bit = None
         self.lora_base_model_4bit = None
         self.use_adamw_8bit = False
+        self.offload_to_cpu = False
+        self.offload_percentage = 100.0
+        self.text_encoder_4bit = False
 
         # lora
         self.lora_target_modules = None
@@ -223,6 +226,15 @@ class TrainingParameters:
         # option with the shards download locally (the most stable)
         self.local_shard_paths = yaml_root['local_shard_paths'] if 'local_shard_paths' in yaml_root.keys() else None
         self.use_adamw_8bit  = 'use_adamw_8bit' in yaml_root.keys()
+
+        # keep the frozen transformer block weights in cpu memory and stream them in per block
+        # bnb 4bit for the text encoder alone, whatever the transformer does
+        self.text_encoder_4bit = 'text_encoder_4bit' in yaml_root.keys() and bool(yaml_root['text_encoder_4bit'])
+        self.offload_to_cpu = 'offload_to_cpu' in yaml_root.keys() and bool(yaml_root['offload_to_cpu'])
+        # share of the transformer blocks streamed from the cpu, the others stay on the gpu
+        self.offload_percentage = float(yaml_root['offload_percentage']) if 'offload_percentage' in yaml_root.keys() else 100.0
+        if not 0.0 <= self.offload_percentage <= 100.0:
+            raise ValueError('offload_percentage must be between 0 and 100')
         
         # lora training
         if 'lora_rank' in yaml_root.keys():

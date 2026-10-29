@@ -22,6 +22,7 @@ from common.repa import RepaModel, RepaConfig
 from common.precompute import FeaturesPrecompute
 from common.peft_bnb_patch import patch_lycoris_for_bnb_4bit
 from common import lw_controlnet
+from common.offload import offload_frozen_blocks
 from accelerate.utils import InitProcessGroupKwargs, DistributedDataParallelKwargs
 from datetime import timedelta
 from peft.helpers import rescale_adapter_scale
@@ -425,8 +426,23 @@ class Model:
         else:
             self.optimizer = bitsandbytes.optim.Lion8bit(params=params_to_optimizer, lr=params.learning_rate, weight_decay=params.weight_decay)
 
+        if self.params.offload_to_cpu:
+            if self.params.dual_gpu:
+                raise ValueError('offload_to_cpu cannot be combined with dual_gpu')
+            self.offload = offload_frozen_blocks(self.model, self.accelerator.device,
+                                                 self.params.offload_percentage)
+
         if self.params.dual_gpu == False:
-            self.optimizer, self.model, self.sampler = self.accelerator.prepare(self.optimizer, self.model, self.sampler)
+            if self.params.offload_to_cpu:
+                # DistributedDataParallel refuses a module that spans the cpu and the gpu, and
+                # prepare would move the whole model back to the gpu anyway. The model stays as it
+                # is: only the adapter trains, so the processes start from the same weights and
+                # average its gradients by hand, which is all DDP would have done here.
+                self.optimizer, self.sampler = self.accelerator.prepare(self.optimizer, self.sampler)
+                self.sync_trainable_parameters()
+            else:
+                self.optimizer, self.model, self.sampler = self.accelerator.prepare(
+                    self.optimizer, self.model, self.sampler)
 
         warmup_steps = params.warmup_steps
         self.lr_scheduler = None
@@ -455,6 +471,31 @@ class Model:
         self.validation_step_callback = None
         if len(self.timesteps) != 0:
             self.validation_step_callback =  step_callback
+
+    def trainable_parameters(self):
+        return [parameter for parameter in self.model.parameters() if parameter.requires_grad]
+
+    def sync_trainable_parameters(self):
+        """Give every process the weights of the first one, the way DDP does when it wraps a model."""
+        if self.accelerator.num_processes == 1:
+            return
+        with torch.no_grad():
+            for parameter in self.trainable_parameters():
+                torch.distributed.broadcast(parameter.data, src=0)
+
+    def average_gradients(self):
+        """The all reduce DDP would do during the backward, for a model that is not wrapped in it."""
+        if self.accelerator.num_processes == 1:
+            return
+        gradients = [parameter.grad for parameter in self.trainable_parameters() if parameter.grad is not None]
+        for gradient in gradients:
+            torch.distributed.all_reduce(gradient)
+            gradient /= self.accelerator.num_processes
+
+    def gpu_resident(self):
+        """A context that has the whole model on the gpu, for the validation images."""
+        offload = getattr(self, 'offload', None)
+        return offload.on_device() if offload != None else contextlib.nullcontext()
 
     def validate(self):
         raise NotImplemented
@@ -622,6 +663,8 @@ class Model:
                         avg_class_loss = avg_class_loss + class_loss
 
                     if self.accelerator.sync_gradients:
+                        if self.params.offload_to_cpu:
+                            self.average_gradients()
                         self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                         self.optimizer.step()
 

@@ -31,11 +31,17 @@ class Krea2Model(Model):
             quant_backend="bitsandbytes_4bit",
             quant_kwargs={"load_in_4bit": True, "bnb_4bit_quant_type": "nf4", "bnb_4bit_compute_dtype": torch.bfloat16},
             components_to_quantize=["text_encoder"],
-        ) if params.lora_base_model_4bit and not self.skip_text_encoder else None
+        ) if (params.lora_base_model_4bit or params.text_encoder_4bit) and not self.skip_text_encoder else None
 
         # separate bnb config for the transformer: PipelineQuantizationConfig only quantizes components the
         # pipe itself instantiates from the checkpoint, so a transformer passed in pre-built (pretrained_model_path
         # branch) or loaded standalone (subfolder branch below) needs its own quantization_config to actually shrink.
+        # bnb only quantizes when the weights reach the gpu, so a 4 bit transformer is loaded there (a
+        # quarter of the size) and its packed weights are streamed from the cpu afterwards. The bf16 one is
+        # loaded on the cpu, where it is too big to be put whole on the gpu anyway.
+        offload_on_cpu = params.offload_to_cpu and not params.lora_base_model_4bit
+        transformer_device = 'cpu' if offload_on_cpu else f"cuda:{self.accelerator.process_index}"
+
         transformer_quant_config = None
         if params.lora_base_model_4bit:
             transformer_quant_config = BitsAndBytesConfig(
@@ -47,7 +53,7 @@ class Krea2Model(Model):
             transformer = Krea2Transformer2DModel.from_pretrained(params.pretrained_model_path,
                                                                  quantization_config=transformer_quant_config,
                                                                  torch_dtype=torch.bfloat16,
-                                                                 device_map=f"cuda:{self.accelerator.process_index}")
+                                                                 device_map=transformer_device)
 
             self.pipe = Krea2Pipeline.from_pretrained(
                 params.pretrained_pipe_path,
@@ -64,7 +70,7 @@ class Krea2Model(Model):
                     subfolder='transformer',
                     quantization_config=transformer_quant_config,
                     torch_dtype=torch.bfloat16,
-                    device_map=f"cuda:{self.accelerator.process_index}")
+                    device_map=transformer_device)
             self.pipe = Krea2Pipeline.from_pretrained(params.pretrained_pipe_path, **pipe_kwargs)
 
         self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(params.pretrained_pipe_path, subfolder='scheduler')
@@ -83,7 +89,15 @@ class Krea2Model(Model):
         self.pipe.vae.to(torch.bfloat16)
 
         self.model = self.pipe.transformer
-        self.model.enable_gradient_checkpointing()
+        if params.offload_to_cpu:
+            # bitsandbytes keeps the dequantization input of every 4 bit layer on the autograd context. With
+            # the non reentrant checkpointing the forward builds a graph anyway, so each offloaded block's
+            # copy would stay on the gpu until the backward: the whole model, streamed in for nothing. The
+            # reentrant variant runs the forward without a graph and rebuilds one block at a time in the backward.
+            self.model.enable_gradient_checkpointing(
+                lambda module, *args: torch.utils.checkpoint.checkpoint(module.__call__, *args, use_reentrant=True))
+        else:
+            self.model.enable_gradient_checkpointing()
 
     def initialize(self):
         super().initialize()
@@ -161,30 +175,32 @@ class Krea2Model(Model):
         if references != None:
             self.free_reference_encoder()
 
-        for embed in tqdm.tqdm(embeds, desc='Generating validation images'):
-            prompt_embeds, prompt_embeds_mask = embed
-            reference = references[idx] if references != None else None
-            if reference != None:
-                reference = lw_controlnet.features_to(reference, self.accelerator.device)
+        # the offloaded blocks are all put on the gpu for the sampling, the weights stream otherwise
+        with self.gpu_resident():
+            for embed in tqdm.tqdm(embeds, desc='Generating validation images'):
+                prompt_embeds, prompt_embeds_mask = embed
+                reference = references[idx] if references != None else None
+                if reference != None:
+                    reference = lw_controlnet.features_to(reference, self.accelerator.device)
 
-            # the conditioning is set once for the whole denoising loop, the negative pass of the
-            # pipeline included: dropping the reference there would be reference guidance, which is
-            # a choice of its own and not what the training optimizes
-            with self.reference_context(reference):
-                image = self.pipe(
-                    negative_prompt=None,
-                    prompt_embeds=prompt_embeds,
-                    prompt_embeds_mask=prompt_embeds_mask,
-                    negative_prompt_embeds=negative_prompt_embeds,
-                    negative_prompt_embeds_mask=negative_prompt_embeds_mask,
-                    guidance_scale=4.5,
-                    num_inference_steps=28,
-                    generator=generator,
-                    width=512,
-                    height=512,
-                ).images[0]
-            self.logger.add_image(f'validation/{idx}/{params.validation_prompts[idx]}', pil_to_tensor(image), self.global_step)
-            idx = idx + 1
+                # the conditioning is set once for the whole denoising loop, the negative pass of the
+                # pipeline included: dropping the reference there would be reference guidance, which is
+                # a choice of its own and not what the training optimizes
+                with self.reference_context(reference):
+                    image = self.pipe(
+                        negative_prompt=None,
+                        prompt_embeds=prompt_embeds,
+                        prompt_embeds_mask=prompt_embeds_mask,
+                        negative_prompt_embeds=negative_prompt_embeds,
+                        negative_prompt_embeds_mask=negative_prompt_embeds_mask,
+                        guidance_scale=4.5,
+                        num_inference_steps=28,
+                        generator=generator,
+                        width=512,
+                        height=512,
+                    ).images[0]
+                self.logger.add_image(f'validation/{idx}/{params.validation_prompts[idx]}', pil_to_tensor(image), self.global_step)
+                idx = idx + 1
 
         self.pipe.text_encoder = text_encoder
         self.pipe.transformer = transformer

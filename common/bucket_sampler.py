@@ -30,6 +30,9 @@ def flush():
     gc.collect()
     torch.cuda.empty_cache()
 
+def has_image(elem):
+    return any(extension in elem for extension in ('jpg', 'jpeg', 'png', 'webp'))
+
 def decode_image(elem):
     """The image of a webdataset sample, whatever extension it was stored under."""
     for extension in ('jpg', 'jpeg', 'png', 'webp'):
@@ -235,6 +238,11 @@ class BucketSampler:
                 res = r
         return res
     
+    # a bucket that is ahead of the same bucket on another process is emptied once its batch is out,
+    # which throws samples away. That is fine for an endless training stream, but a pass that has
+    # to see every sample of a small dataset (the precompute) sets this to keep them
+    keep_leftovers = False
+
     def get_local_shard_path(self, to_train : mp.Queue):
         return to_train.get()
     
@@ -325,6 +333,10 @@ class BucketSampler:
 
             dataset = (
                 wds.WebDataset(local_shard_path, shardshuffle=True, nodesplitter=None, workersplitter=None)
+                # a tar can carry a stray text file next to the pairs (a prompt list, a readme). It is
+                # dropped before the shuffle, so that every rank sees the same number of elements:
+                # the ranks gather in lockstep and one that skips late would hang the others
+                .select(has_image)
                 .shuffle(1000)
                 .decode(self.pt_decoder)
             )
@@ -336,7 +348,7 @@ class BucketSampler:
                 self.accelerator.wait_for_everyone()
 
                 # consume all the accumulated samples in the buckets
-                yield from self.ready_batches(self.buckets)
+                yield from self.ready_batches(self.buckets, keep_leftovers=self.keep_leftovers)
 
             self.remove_shard(to_remove, local_shard_path)
 
