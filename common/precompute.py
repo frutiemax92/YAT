@@ -640,7 +640,10 @@ class FeaturesPrecompute:
         if pool != None:
             # the dreambooth sampler queues one kind of shard or the other depending on this
             sampler.mode = pool
-        limit = None if instance else self.num_batches
+        limit = None if instance or self.params.precompute_all else self.num_batches
+        if self.params.precompute_all and hasattr(sampler, 'sequential_shards'):
+            sampler.sequential_shards = True
+            sampler.next_shard = 0
 
         # the pass stops as soon as the pool is full, so a shard downloaded ahead of the one being
         # read would most likely never be opened: fetch them one at a time instead

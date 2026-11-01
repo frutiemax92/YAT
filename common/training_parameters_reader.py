@@ -116,6 +116,7 @@ class TrainingParameters:
         # precalculate the vae/text encoder features once at startup, then train without them
         self.precompute_features = False
         self.precompute_size = None
+        self.precompute_all = False
         self.precompute_cache_dir = 'precomputed_features'
         self.precompute_force = False
     
@@ -446,7 +447,12 @@ class TrainingParameters:
         self.precompute_features = 'precompute_features' in yaml_root.keys()
         if self.precompute_features:
             # the number of samples to precalculate, the training then loops over that pool
-            self.precompute_size = int(yaml_root['precompute_size']) if 'precompute_size' in yaml_root.keys() else self.cache_size
+            # 'all' precalculates every sample of the dataset, one pass over the shards
+            if str(yaml_root.get('precompute_size')).strip().lower() == 'all':
+                self.precompute_all = True
+                self.precompute_size = 1
+            else:
+                self.precompute_size = int(yaml_root['precompute_size']) if 'precompute_size' in yaml_root.keys() else self.cache_size
             if 'precompute_cache_dir' in yaml_root.keys():
                 self.precompute_cache_dir = yaml_root['precompute_cache_dir']
 

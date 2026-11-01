@@ -102,6 +102,10 @@ class BucketSampler:
         # it stops after precompute_size samples and anything downloaded ahead would be thrown away
         self.max_local_shards = 5
 
+        # the precompute pass of a whole dataset reads every shard once, in order, then stops
+        self.sequential_shards = False
+        self.next_shard = 0
+
         def local_file_getter(process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
             print('using local file getter')
             
@@ -124,6 +128,12 @@ class BucketSampler:
             while True:
                 if in_flight < self.max_local_shards:
                     current_shard_index = self.get_next_shard_index()
+                    if current_shard_index is None:
+                        # every shard was handed out once: tell the sampler there is nothing more, then
+                        # stay alive until it terminates us
+                        to_train.put(None)
+                        while True:
+                            to_remove.get()
                     dataset_url = get_secured_urls(self.r2_access_key,
                                         self.r2_secret_key,
                                         self.r2_endpoint,
@@ -135,7 +145,9 @@ class BucketSampler:
                         download_tar(dataset_url, local_shard_path)
                     except Exception as error:
                         print(error)
-                        current_shard_index = self.get_next_shard_index()
+                        if self.sequential_shards:
+                            # a single pass must not skip a shard: try this one again
+                            self.next_shard = self.next_shard - 1
                         continue
                     to_train.put(local_shard_path)
                     current_item = current_item + 1
@@ -200,6 +212,11 @@ class BucketSampler:
         self.buckets[ratio].append((latent, emb))
     
     def get_next_shard_index(self):
+        if self.sequential_shards:
+            if self.next_shard >= len(self.shards):
+                return None
+            self.next_shard = self.next_shard + 1
+            return self.next_shard - 1
         return random.randint(0, len(self.shards) - 1)
     
     def extract_features(self, batch, ratio):
