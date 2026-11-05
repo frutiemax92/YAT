@@ -1,3 +1,5 @@
+import glob
+import os
 import json
 import yaml
 import huggingface_hub
@@ -217,7 +219,21 @@ class TrainingParameters:
             self.huggingface_dataset_repo = yaml_root['huggingface_dataset_repo']
         
         # option with the shards download locally (the most stable)
-        self.local_shard_paths = yaml_root['local_shard_paths'] if 'local_shard_paths' in yaml_root.keys() else None
+        # entries can be tar files or folders; a folder is searched recursively for its .tar shards
+        self.local_shard_paths = None
+        if 'local_shard_paths' in yaml_root.keys():
+            entries = yaml_root['local_shard_paths']
+            if isinstance(entries, str):
+                entries = [entries]
+            self.local_shard_paths = []
+            for entry in entries:
+                entry = os.path.expanduser(str(entry))
+                if os.path.isdir(entry):
+                    found = sorted(glob.glob(os.path.join(glob.escape(entry), '**', '*.tar'), recursive=True))
+                    print(f'{entry}: found {len(found)} shards')
+                    self.local_shard_paths.extend(found)
+                else:
+                    self.local_shard_paths.append(entry)
         self.use_adamw_8bit  = 'use_adamw_8bit' in yaml_root.keys()
 
         # keep the frozen transformer block weights in cpu memory and stream them in per block
