@@ -56,17 +56,11 @@ class TrainingParameters:
         self.offload_percentage = 100.0
         self.text_encoder_4bit = False
 
-        # lora
-        self.lora_target_modules = None
-        self.lora_rank = None
-        self.lora_alpha = None
-        self.lora_dropout = None
-        self.lora_bias = None
-        self.lora_use_rslora = None
+        # the peft adapter, as the raw content of the `peft` section of the yaml (None: no adapter)
+        self.peft = None
+        # autocast_adapter_dtype of get_peft_model / PeftModel.from_pretrained
+        self.peft_autocast_adapter_dtype = True
         self.lora_pretrained = None
-
-        # keep the lora/dora adapters in bfloat16 instead of the float32 peft casts them to
-        self.lora_adapter_bf16 = False
 
         # lr scheduler
         self.cyclic_lr_max_lr = None
@@ -200,8 +194,6 @@ class TrainingParameters:
         if 'use_ema' in yaml_root.keys():
             self.use_ema = True
         
-        self.lora_use_dora = 'lora_use_dora' in yaml_root.keys()
-        
         # train using unconditional steps probability
         self.train_unconditional_prob = 0.0
         if 'train_unconditional_prob' in yaml_root.keys():
@@ -237,36 +229,26 @@ class TrainingParameters:
         if not 0.0 <= self.offload_percentage <= 100.0:
             raise ValueError('offload_percentage must be between 0 and 100')
         
-        # lora training
-        if 'lora_rank' in yaml_root.keys():
-            if 'lora_pretrained' in yaml_root.keys():
-                self.lora_pretrained = yaml_root['lora_pretrained']
-            self.lora_target_modules = yaml_root['lora_target_modules']
-            self.lora_rank = int(yaml_root['lora_rank'])
-            self.lora_alpha = int(yaml_root['lora_alpha'])
+        # peft adapter: the `peft` section is handed as is to peft's config loader (PeftConfig.from_peft_type),
+        # so it takes whatever the config class of its peft_type takes (LORA, LOHA, LOKR, FOURIERFT, ...).
+        # It is read with a typed loader, the loader above keeps every value as a string.
+        # autocast_adapter_dtype: false keeps the adapters in bfloat16 instead of the float32 peft casts them
+        # to. That halves what dora has to materialize to compute its weight norm, which is what makes dora
+        # fit at all on a small card
+        peft_root = yaml.safe_load(contents).get('peft')
+        if peft_root:
+            self.peft = dict(peft_root)
+            if 'peft_type' not in self.peft:
+                raise KeyError('the peft section needs a peft_type, such as LORA, LOHA, LOKR or FOURIERFT')
+            self.peft_autocast_adapter_dtype = bool(self.peft.pop('autocast_adapter_dtype', True))
+        if 'lora_pretrained' in yaml_root.keys():
+            self.lora_pretrained = yaml_root['lora_pretrained']
 
-            # load the base model in 8bit
-            self.lora_base_model_8bit = True if 'lora_base_model_8bit' in yaml_root.keys() else False
+        # load the base model in 8bit
+        self.lora_base_model_8bit = 'lora_base_model_8bit' in yaml_root.keys()
 
-            # load the base model in 4bit (bitsandbytes QLoRA-style quantization)
-            self.lora_base_model_4bit = True if 'lora_base_model_4bit' in yaml_root.keys() else False
-
-            if 'lora_dropout' in yaml_root.keys():
-                self.lora_dropout = float(yaml_root['lora_dropout'])
-            else:
-                self.lora_dropout = 0.0
-            self.lora_bias = 'lora_bias' in yaml_root.keys()
-            self.lora_algo = yaml_root['lora_algo'] # locon, lora, loha, lokr, dylora, glora, full, diag-oft, boft
-
-            # peft casts the adapters to float32 for numerical stability. Keeping them in
-            # bfloat16 halves what dora has to materialize to compute its weight norm, which is
-            # what makes dora fit at all on a small card
-            self.lora_adapter_bf16 = 'lora_adapter_bf16' in yaml_root.keys()
-
-            self.lora_use_rslora = 'lora_use_rslora' in yaml_root.keys()
-            self.lora_use_dora = 'lora_use_dora' in yaml_root.keys()
-
-        self.fourierft_alpha = float(yaml_root['fourierft_alpha']) if 'fourierft_alpha' in yaml_root.keys() else 0.01
+        # load the base model in 4bit (bitsandbytes QLoRA-style quantization)
+        self.lora_base_model_4bit = 'lora_base_model_4bit' in yaml_root.keys()
         self.low_vram = 'low_vram' in yaml_root.keys()
         self.use_calculated_features = 'use_calculated_features' in yaml_root.keys()
 

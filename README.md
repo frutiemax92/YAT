@@ -86,7 +86,7 @@ removing the line is what disables it.
 - `aspect_ratio` : overrides the aspect ratio bucket table. `512` and `1024` select the standard tables, any other value scales the 1024 table by `aspect_ratio / 1024`.
 - `exploration_steps` : from the paper *explorative modeling: unlocking a third pretraining axis and end-to-end generation*. Each step draws that many noise samples, and the one with the lowest loss is the one that gets trained on.
 - `dual_gpu` : dedicate the second GPU to the feature extraction and send the features to the first GPU, which only trains. It cannot be combined with `precompute_features`.
-- `low_vram` : use this when low on VRAM. For SANA, it is possible with this option to train with a `batch size=4`, `lora_rank=8`, `lora_algo=lora` under 12 GB VRAM (tested on dual RTX4070s). Only the SD3.5 trainer acts on it at the moment.
+- `low_vram` : use this when low on VRAM. For SANA, it is possible with this option to train with a `batch size=4`, a `LORA` peft section with `r: 8` under 12 GB VRAM (tested on dual RTX4070s). Only the SD3.5 trainer acts on it at the moment.
 - `validation_prompts` : a list of validation prompts for your validation.
 
 ### Model
@@ -145,21 +145,30 @@ ratio does invalidate it.
 
 ### LoRA
 
-- `lora_rank` : the rank of the lora (see https://arxiv.org/abs/2106.09685)
-- `lora_alpha` : the alpha parameter for lora training. A correct value is `lora_alpha=lora_rank`.
-- `lora_dropout` : dropout probability for lora training
-- `lora_algo` : the algorithm to use for lora training
-  - `lora`
-  - `loha`
-  - `lokr`
-  - `fourierft`
-- `lora_target_modules` : the names of the targeted modules for the reparametrization. For SANA, a good value is `conv_inverted conv_point to_q to_k to_v to_out.0 linear_1 linear_2 proj`.
+- `peft` : the adapter, configured directly with the parameters of the peft library. The section is handed as is to
+  `PeftConfig.from_peft_type`, so it takes whatever the config class of its `peft_type` takes (see the peft documentation of
+  `LoraConfig`, `LoHaConfig`, `LoKrConfig`, `FourierFTConfig`, ...). Leave the section out for no adapter. Example:
+  ```yaml
+  peft:
+    peft_type: LORA        # LORA, LOHA, LOKR, FOURIERFT, ...
+    r: 32
+    lora_alpha: 32
+    lora_dropout: 0.0
+    use_dora: true         # any other parameter of LoraConfig
+    autocast_adapter_dtype: false   # not a config parameter: see below
+    target_modules:
+      - to_q
+      - to_k
+      - to_v
+      - to_out.0
+  ```
+  For SANA, a good value of `target_modules` is `conv_inverted conv_point to_q to_k to_v to_out.0 linear_1 linear_2 proj`.
+  `autocast_adapter_dtype: false` keeps the adapters in bfloat16 instead of the float32 peft casts them to. It roughly halves
+  what DoRA has to materialize on every forward, at the cost of some numerical stability, so watch the loss when turning it on.
+  On a 12 GB card it is what makes `use_dora` fit with a wide `target_modules` list.
 - `lora_pretrained` : if you want to resume training from a lora model, specify it there
-- `lora_use_dora` : use DoRA (weight decomposed low rank adaptation) instead of plain lora.
 - `lora_base_model_8bit` : load the frozen base model in 8 bit with bitsandbytes.
 - `lora_base_model_4bit` : load the frozen base model in 4 bit (nf4, QLoRA style). For the models with a big text encoder, such as Krea 2, it also quantizes the text encoder.
-- `fourierft_alpha` : the alpha of the `fourierft` algorithm, defaults to `0.01`.
-- `lora_adapter_bf16` : keep the adapters in bfloat16 instead of the float32 peft casts them to. It roughly halves what DoRA has to materialize on every forward, at the cost of some numerical stability, so watch the loss when turning it on. On a 12 GB card it is what makes `lora_use_dora` fit with a wide `lora_target_modules` list.
 
 ### Dreambooth
 
@@ -300,13 +309,13 @@ replaced; loading one is refused by name rather than half succeeding.
 
 **The LoRA is optional.** The control path never touches an adapter - it hooks the layer, whatever that
 layer turned out to be - and the trainer freezes the base model itself when there is no LoRA to do it,
-so leaving `lora_rank` out gives a control only run: the control path is the only thing the optimizer
+so leaving the `peft` section out gives a control only run: the control path is the only thing the optimizer
 is handed, the reference is the only thing in the model that can account for anything, and a checkpoint
 is a few megabytes instead of a copy of the model. That is the run to start with when the question is
 whether the reference works at all. `infer_krea2_controlnet.py` reads such a checkpoint as it is; its
 `--lora_rank` defaults to `0`, meaning no adapter.
 
-With a `lora_rank` set, both halves train: PEFT froze the base weights and left the adapter trainable,
+With a `peft` section, both halves train: PEFT froze the base weights and left the adapter trainable,
 and which of the two learns on a given batch is `lw_controlnet_freeze_path`'s call. Rank has nothing to
 do with the reference's capacity any more - under the architecture this replaced everything the
 reference contributed had to pass through those `r` numbers, and now it is added to the layer's output

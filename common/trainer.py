@@ -6,8 +6,7 @@ from torch.utils.tensorboard import SummaryWriter
 import torch
 import tqdm
 import gc
-from peft import LoraConfig, get_peft_model, PeftModel
-from peft import LoHaConfig, LoKrConfig, FourierFTConfig
+from peft import PeftConfig, get_peft_model, PeftModel
 import os
 from diffusers.training_utils import EMAModel
 from diffusers import BitsAndBytesConfig, SanaTransformer2DModel
@@ -352,38 +351,16 @@ class Model:
             self.sampler = self.features_precompute.run(self.sampler)
 
         # check for lora training
-        if self.params.lora_rank != None:
+        if self.params.peft is not None:
             patch_lycoris_for_bnb_4bit()
-            dtype = self.model.dtype
             if self.params.lora_pretrained == None:
-                if params.lora_algo == 'lora':
-                    config = LoraConfig(r=params.lora_rank,
-                                        lora_dropout=params.lora_dropout,
-                                        target_modules=params.lora_target_modules,
-                                        lora_alpha=params.lora_alpha,
-                                        use_dora=params.lora_use_dora)
-                elif params.lora_algo == 'loha':
-                    config = LoHaConfig(r=params.lora_rank,
-                                        module_dropout=params.lora_dropout,
-                                        target_modules=params.lora_target_modules,
-                                        alpha=params.lora_alpha)
-                elif params.lora_algo == 'lokr':
-                    config = LoKrConfig(r=params.lora_rank,
-                                        module_dropout=params.lora_dropout,
-                                        target_modules=params.lora_target_modules,
-                                        alpha=params.lora_alpha)
-                elif params.lora_algo == 'fourierft':
-                    config = FourierFTConfig(
-                        target_modules=params.lora_target_modules, 
-                        init_weights=True, 
-                        alpha=params.fourierft_alpha, 
-                        scaling=1.0, 
-                        ifft2_norm='ortho')
+                # the peft section of the yaml goes straight to peft's config loader
+                config = PeftConfig.from_peft_type(**self.params.peft)
                 self.model = get_peft_model(self.model, config,
-                                            autocast_adapter_dtype=not params.lora_adapter_bf16)
+                                            autocast_adapter_dtype=self.params.peft_autocast_adapter_dtype)
             else:
                 self.model = PeftModel.from_pretrained(self.model, params.lora_pretrained, is_trainable=True,
-                                                       autocast_adapter_dtype=not params.lora_adapter_bf16)
+                                                       autocast_adapter_dtype=self.params.peft_autocast_adapter_dtype)
             self.model.print_trainable_parameters()
 
         # the control path goes on after the adapter exists, so that the hook of a layer peft has
@@ -397,7 +374,7 @@ class Model:
             # underneath instead, and a full finetune with a control path bolted onto it is not the
             # cheap thing this is for - so it is frozen here, and the control path is the only thing
             # the optimizer is given.
-            if self.params.lora_rank == None:
+            if self.params.peft is None:
                 frozen = 0
                 for parameter in self.model.parameters():
                     if parameter.requires_grad:
@@ -526,7 +503,7 @@ class Model:
         # A run with no adapter has nothing else to write: the base model is frozen and byte for byte
         # what it was loaded from, so saving it would copy several gigabytes of unchanged weights
         # next to every checkpoint.
-        if self.params.lora_rank != None:
+        if self.params.peft is not None:
             with lw_controlnet.detached_control(model):
                 model.save_pretrained(directory)
         lw_controlnet.save_control(self.reference_control, directory)
