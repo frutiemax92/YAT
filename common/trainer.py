@@ -19,6 +19,7 @@ import math
 import contextlib
 from common.repa import RepaModel, RepaConfig
 from common.precompute import FeaturesPrecompute
+from common.text_precompute import TextEmbeddingsPrecompute
 from common.peft_bnb_patch import patch_lycoris_for_bnb_4bit
 from common import lw_controlnet
 from common.offload import offload_frozen_blocks
@@ -348,6 +349,12 @@ class Model:
             if self.params.dual_gpu:
                 raise ValueError('precompute_features cannot be combined with dual_gpu')
             self.features_precompute = FeaturesPrecompute(self)
+            self.sampler = self.features_precompute.run(self.sampler)
+        elif self.params.precompute_text_embeddings:
+            # only the text embeddings are cached, the vae stays loaded and encodes every step
+            if self.params.dual_gpu:
+                raise ValueError('precompute_text_embeddings cannot be combined with dual_gpu')
+            self.features_precompute = TextEmbeddingsPrecompute(self)
             self.sampler = self.features_precompute.run(self.sampler)
 
         # check for lora training

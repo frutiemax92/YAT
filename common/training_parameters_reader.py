@@ -115,21 +115,46 @@ class TrainingParameters:
         self.precompute_all = False
         self.precompute_cache_dir = 'precomputed_features'
         self.precompute_force = False
+        self.precompute_text_embeddings = False
+        self.text_embeddings_cache_dir = 'precomputed_text_embeddings'
+        self.text_embeddings_force = False
     
+    @staticmethod
+    def read_r2_credentials():
+        credentials = {}
+        path = os.environ.get('R2_CREDENTIALS_FILE', 'r2_credentials.yaml')
+        if os.path.exists(path):
+            with open(path) as f:
+                credentials = yaml.load(f.read(), Loader=yaml.BaseLoader) or {}
+        for key in ['r2_endpoint', 'r2_access_key', 'r2_secret_key', 'r2_bucket_name']:
+            if key.upper() in os.environ:
+                credentials[key] = os.environ[key.upper()]
+        return credentials
+
     def read_yaml(self, file):
         with open(file) as f:
             contents = f.read()
         yaml_root = yaml.load(contents, Loader=yaml.BaseLoader)
-        if 'r2_endpoint' in yaml_root.keys():
-            self.r2_endpoint = yaml_root['r2_endpoint']
-            self.r2_access_key = yaml_root['r2_access_key']
-            self.r2_secret_key = yaml_root['r2_secret_key']
-            self.r2_bucket_name = yaml_root['r2_bucket_name']
+        # the r2 credentials are not meant to live in the config, which gets committed: they come from the
+        # environment (R2_ENDPOINT, R2_ACCESS_KEY, R2_SECRET_KEY, R2_BUCKET_NAME) or from r2_credentials.yaml
+        # (a gitignored file, another path in R2_CREDENTIALS_FILE). A value in the config still wins.
+        r2_keys = ['r2_endpoint', 'r2_access_key', 'r2_secret_key', 'r2_bucket_name']
+        uses_r2 = any(key in yaml_root.keys() for key in r2_keys + ['r2_dataset_folder', 'r2_tar_files'])
+        if uses_r2 and 'urls' not in yaml_root.keys():
+            credentials = self.read_r2_credentials()
+            for key in r2_keys:
+                value = yaml_root[key] if key in yaml_root.keys() else credentials.get(key)
+                if value is None:
+                    raise KeyError(f'{key} is in neither the config, the {key.upper()} environment variable '
+                                   f'nor r2_credentials.yaml')
+                setattr(self, key, value)
 
             self.r2_tar_files = yaml_root['r2_tar_files'] if 'r2_tar_files' in yaml_root.keys() else None
-        else:
+        elif 'urls' in yaml_root.keys():
             self.urls = yaml_root['urls']
-        
+        elif 'local_shard_paths' not in yaml_root.keys():
+            raise KeyError('the config needs urls, r2 settings or local_shard_paths')
+
         self.warmup_steps = int(yaml_root['warmup_steps']) if 'warmup_steps' in yaml_root.keys() else None
         
         self.compute_features = False
@@ -458,6 +483,25 @@ class TrainingParameters:
             self.precompute_force = 'precompute_force' in yaml_root.keys()
 
             # the precompute pass reads images and captions, so it needs the extracting sampler
+            self.compute_features = True
+            if 'vae_max_batch_size' not in yaml_root.keys():
+                self.vae_max_batch_size = 1
+            if 'text_encoder_max_batch_size' not in yaml_root.keys():
+                self.text_encoder_max_batch_size = 1
+
+        # encode every caption of local_shard_paths once and free the text encoder, while the vae keeps
+        # encoding the images at every step (nothing of the vae is precalculated)
+        self.precompute_text_embeddings = str(yaml_root.get('precompute_text_embeddings', 'false')).strip().lower() in ('true', '1', 'yes')
+        if self.precompute_text_embeddings:
+            if self.precompute_features:
+                raise ValueError('precompute_text_embeddings is redundant with precompute_features, which '
+                                 'already precomputes the text embeddings along with the vae features')
+            if self.local_shard_paths is None:
+                raise ValueError('precompute_text_embeddings reads the captions of local_shard_paths')
+            if 'text_embeddings_cache_dir' in yaml_root.keys():
+                self.text_embeddings_cache_dir = yaml_root['text_embeddings_cache_dir']
+            # encode everything again even if the cache is complete
+            self.text_embeddings_force = 'text_embeddings_force' in yaml_root.keys()
             self.compute_features = True
             if 'vae_max_batch_size' not in yaml_root.keys():
                 self.vae_max_batch_size = 1

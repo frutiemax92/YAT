@@ -111,6 +111,9 @@ class Krea2Model(Model):
         vae = self.pipe.vae
         vae.to(device=self.accelerator.device)
 
+        # the 1024px encoder activations don't fit next to the model on the gpu without tiling
+        vae.enable_tiling()
+
         # the qwen-image vae is a video vae, so images need a frame dimension of 1
         pixel_values = images.to(device=self.accelerator.device, dtype=vae.dtype).unsqueeze(2)
         latents = vae.encode(pixel_values).latent_dist.sample()[:, :, 0]

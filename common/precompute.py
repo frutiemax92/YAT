@@ -306,6 +306,9 @@ def precomputed_prompts_available(params, process_index, num_processes=1):
     altogether, which is the difference between fitting on a small card and not. It has to agree
     with what the precompute pass will decide, or the pass extracts again without a text encoder.
     """
+    if getattr(params, 'precompute_text_embeddings', False):
+        from common.text_precompute import text_embeddings_available
+        return text_embeddings_available(params)
     if not getattr(params, 'precompute_features', False):
         return False
     if getattr(params, 'precompute_force', False):

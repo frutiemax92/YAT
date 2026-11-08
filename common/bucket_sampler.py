@@ -107,15 +107,41 @@ class BucketSampler:
         self.next_shard = 0
 
         def local_file_getter(process_index : int, to_train : mp.Queue, to_remove : mp.Queue):
-            print('using local file getter')
-            
-            local_path = random.choice(self.local_paths)
-            while os.path.exists(local_path) == False:
-                local_path = random.choice(self.local_paths)
-            to_train.put(local_path)
+            """Hands out the local shards one at a time, and never deletes them.
 
-            # the simplest solution is to wait for to_remove
-            r = to_remove.get()
+            The trainer keeps asking for shards for as long as it trains, so this must not stop after
+            the first one: it used to, and the training then hung on to_train.get() once the shard was
+            used up. A single pass (sequential_shards) reads each shard once, then signals the end.
+            """
+            print('using local file getter')
+            rng = random.Random(process_index + self.seed)
+            existing = [path for path in self.local_paths if os.path.exists(path)]
+            for path in sorted(set(self.local_paths) - set(existing)):
+                print(f'[Warning] {path} does not exist, skipping it')
+            if not existing:
+                print('[Error] none of the local_shard_paths exist')
+                to_train.put(None)
+                while True:
+                    to_remove.get()
+
+            def hand_out(path):
+                to_train.put(path)
+                # the trainer is done with the shard before it asks for the next one
+                to_remove.get()
+
+            if self.sequential_shards:
+                for path in existing:
+                    hand_out(path)
+                to_train.put(None)
+                # stay alive until the sampler terminates us
+                while True:
+                    to_remove.get()
+
+            order = list(existing)
+            while True:
+                rng.shuffle(order)
+                for path in order:
+                    hand_out(path)
 
         def download_shard_worker(process_index : int,
             to_train : mp.Queue, 
