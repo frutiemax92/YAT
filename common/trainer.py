@@ -428,6 +428,8 @@ class Model:
                 self.optimizer, self.model, self.sampler = self.accelerator.prepare(
                     self.optimizer, self.model, self.sampler)
 
+        self.load_optimizer_state()
+
         warmup_steps = params.warmup_steps
         self.lr_scheduler = None
         if warmup_steps != None:
@@ -492,6 +494,37 @@ class Model:
 
     def repa_loss(self, batch):
         return 0.0
+
+    def optimizer_state_path(self, directory):
+        return os.path.join(directory, 'optimizer.pt')
+
+    def save_optimizer_state(self):
+        """Writes the optimizer state next to the model that save_model just wrote."""
+        directory = f'models/{self.global_step}'
+        os.makedirs(directory, exist_ok=True)
+        torch.save(self.optimizer.state_dict(), self.optimizer_state_path(directory))
+
+    def load_optimizer_state(self):
+        """When resuming from a saved model, loads the optimizer state saved beside it, if any."""
+        for source in (self.params.lora_pretrained, self.params.lw_controlnet_pretrained,
+                       self.params.pretrained_model_path):
+            if source is None or not os.path.isdir(source):
+                continue
+            path = self.optimizer_state_path(source)
+            if not os.path.isfile(path):
+                continue
+            try:
+                self.optimizer.load_state_dict(torch.load(path, map_location='cpu'))
+            except Exception as e:
+                print(f'[Warning] could not load the optimizer state from {path}: {e}')
+                return
+            # the saved groups carry the learning rate of the step they were saved at, which may
+            # be mid warmup: the configuration decides
+            for group in self.optimizer.param_groups:
+                group['lr'] = self.params.learning_rate
+                group['weight_decay'] = self.params.weight_decay
+            print(f'resumed the optimizer state from {path}')
+            return
 
     def save_model(self):
         directory = f'models/{self.global_step}'
@@ -727,6 +760,7 @@ class Model:
                                 if len(self.timesteps) != 0:
                                     rescale_adapter_scale(self.model, 1.0)
                                 self.save_model()
+                                self.save_optimizer_state()
                     
                                 if self.ema_model != None:
                                     self.ema_model.restore(self.model.parameters())
