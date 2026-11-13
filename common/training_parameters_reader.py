@@ -312,7 +312,16 @@ class TrainingParameters:
             self.bucket_repeat = int(yaml_root['bucket_repeat'])
 
         # aspect ratios override
-        self.aspect_ratios = int(yaml_root['aspect_ratio']) if 'aspect_ratio' in yaml_root.keys() else None
+        # the resolutions to train at: a list (`aspect_ratio: [512, 1024]`) or a single number
+        resolutions = yaml_root.get('aspect_ratio', yaml_root.get('aspect_ratios'))
+        if resolutions is None:
+            self.aspect_ratios = None
+        else:
+            if not isinstance(resolutions, (list, tuple)):
+                resolutions = [resolutions]
+            self.aspect_ratios = sorted({int(resolution) for resolution in resolutions}, reverse=True)
+            if len(self.aspect_ratios) == 0:
+                raise ValueError('aspect_ratio must hold at least one resolution')
 
         # for training simple dreambooth loras
         if 'dreambooth_dataset_folder' in yaml_root.keys():

@@ -54,7 +54,7 @@ class DatasetFetcher:
 
             def assign_bucket(img):
                 w, h = img.size
-                return self.model.find_closest_ratio(h / w)
+                return self.model.assign_bucket(h / w)
 
             dataset = (
                 wds.WebDataset(local_shard_path, shardshuffle=False, nodesplitter=None, workersplitter=None, handler=wds.ignore_and_continue)
@@ -71,7 +71,7 @@ class DatasetFetcher:
 
                     # Apply transform
                     w, h = img.size
-                    bucket = self.model.find_closest_ratio(h / w)
+                    bucket = self.model.assign_bucket(h / w)
 
                     if bucket not in self.queues:
                         self.queues[bucket] = []

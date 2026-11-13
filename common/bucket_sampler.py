@@ -78,9 +78,11 @@ class BucketSampler:
         self.accelerator = accelerator
         self.shards = shards
         self.model = model
-        self.buckets = {float(key) : [] for key in model.aspect_ratios.keys()}
+        # the keys are those of the aspect ratio table: '0.67', or '512:0.67' when training at several
+        # resolutions, so that a batch only ever holds one aspect ratio at one resolution
+        self.buckets = {key : [] for key in model.aspect_ratios.keys()}
         self.valid_buckets = set()
-        self.ready_bucket = -1.0
+        self.ready_bucket = None
         self.seed = seed
         self.use_repa = use_repa
         self.batch_size = batch_size
@@ -232,7 +234,7 @@ class BucketSampler:
 
     def process_element(self, elem):
         ratio, latent, emb = elem['ratio'], elem['latent.pt'], elem['emb.pt']
-        ratio = float(ratio)
+        ratio = str(ratio)
         if not ratio in self.buckets.keys():
             self.add_bucket(ratio)
         self.buckets[ratio].append((latent, emb))
@@ -434,21 +436,13 @@ class BucketSamplerExtractFeatures(BucketSampler):
         self.valid_shards = []
 
     def find_closest_ratio(self, ratio):
-        error = 1000
-        res = -1
-        for r in self.model.aspect_ratios.keys():
-            new_error = abs(float(r) - ratio)
-            if new_error < error:
-                error = new_error
-                res = float(r)
-        return res
+        """The bucket of an image of aspect ratio `ratio`, at a resolution drawn at random."""
+        return self.model.assign_bucket(ratio)
     
     def process_element(self, elem):
         img = decode_image(elem)
         caption = elem['txt']
-        ratio = img.height / img.width
-        ratio = float(ratio)
-        ratio = self.find_closest_ratio(ratio)
+        ratio = self.find_closest_ratio(float(img.height) / img.width)
         self.buckets[ratio].append((img, caption))
     
     def extract_features(self, batch, ratio, low_vram=False):
@@ -580,7 +574,7 @@ class ReferencePairedSamples:
             return
         # ready_batches walks the keys in a fixed order and gathers their counts, so every process
         # has to hold the same key set
-        self.buckets = {(float(key), has_reference): []
+        self.buckets = {(key, has_reference): []
                         for key in self.model.aspect_ratios.keys()
                         for has_reference in (0, 1)}
 

@@ -16,6 +16,7 @@ from torch.optim.lr_scheduler import LambdaLR
 import os
 from diffusers.training_utils import compute_density_for_timestep_sampling
 import math
+import copy
 import contextlib
 from common.repa import RepaModel, RepaConfig
 from common.precompute import FeaturesPrecompute
@@ -205,35 +206,58 @@ class Model:
     def format_embeddings(self, embeds):
         pass
 
-    def find_closest_ratio(self, ratio):
-        # find the closest ratio from the aspect ratios table
-        min_distance = 100
-        target_ratio = 0.6
-        for r in self.aspect_ratios.keys():
-            distance = abs(float(r) - ratio)
-            if min_distance > distance:
-                target_ratio = r
-                min_distance = distance
-        
-        # Return the result as a tuple (target_ratio, idx)
-        return str(target_ratio)
-    
+    def resolution_buckets(self):
+        """{resolution: {bucket key: height / width}} for the resolutions being trained at.
+
+        With a single resolution the bucket keys are the keys of the aspect ratio table ('0.67'). With
+        several they are '<resolution>:<key>' ('512:0.67'), so that a bucket only ever holds images
+        of one aspect ratio and one resolution.
+        """
+        resolutions = getattr(self, 'resolutions', None)
+        if not resolutions or len(resolutions) == 1:
+            resolution = resolutions[0] if resolutions else None
+            return {resolution: {key: float(key) for key in self.aspect_ratios.keys()}}
+        return {resolution: {key: float(key.split(':')[-1])
+                             for key in self.aspect_ratios.keys() if key.startswith(f'{resolution}:')}
+                for resolution in resolutions}
+
+    def find_closest_ratio(self, ratio, resolution=None):
+        """The bucket key of the aspect ratio table closest to `ratio`, at `resolution`
+        (the largest one being trained at by default)."""
+        tables = self.resolution_buckets()
+        candidates = tables[resolution] if resolution in tables else next(iter(tables.values()))
+        return min(candidates, key=lambda key: abs(candidates[key] - ratio))
+
+    def assign_bucket(self, ratio, rng=random):
+        """The bucket of an image of aspect ratio `ratio`, at a resolution drawn at random."""
+        resolution = rng.choice(list(self.resolution_buckets().keys()))
+        return self.find_closest_ratio(ratio, resolution)
+
     # by default, we enable xformers
     def enable_efficient_attention(self):
         self.pipe.enable_xformers_memory_efficient_attention()
         
     def initialize(self):
-        # override aspect ratios
-        if self.params.aspect_ratios == 512:
-            self.aspect_ratios = ASPECT_RATIO_512_BIN
-        elif self.params.aspect_ratios == 1024:
-            self.aspect_ratios = ASPECT_RATIO_1024_BIN
-        elif self.params.aspect_ratios != None:
-            ratio = self.params.aspect_ratios / 1024
-            self.aspect_ratios = ASPECT_RATIO_1024_BIN
-            for key in self.aspect_ratios.keys():
-                self.aspect_ratios[key][0] = float(math.floor(self.aspect_ratios[key][0] * ratio))
-                self.aspect_ratios[key][1] = float(math.floor(self.aspect_ratios[key][1] * ratio))
+        # override aspect ratios: one table per resolution to train at
+        resolutions = self.params.aspect_ratios
+        if resolutions != None:
+            self.resolutions = list(resolutions)
+            tables = {}
+            for resolution in self.resolutions:
+                if resolution == 512:
+                    table = copy.deepcopy(ASPECT_RATIO_512_BIN)
+                else:
+                    scale = resolution / 1024
+                    table = copy.deepcopy(ASPECT_RATIO_1024_BIN)
+                    if resolution != 1024:
+                        for key in table.keys():
+                            table[key] = [float(math.floor(table[key][0] * scale)), float(math.floor(table[key][1] * scale))]
+                tables[resolution] = table
+            if len(tables) == 1:
+                self.aspect_ratios = next(iter(tables.values()))
+            else:
+                self.aspect_ratios = {f'{resolution}:{key}': size
+                                      for resolution, table in tables.items() for key, size in table.items()}
                 
         # use flash attention
         # sana's transformer cannot use this

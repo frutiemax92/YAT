@@ -236,7 +236,7 @@ class PrecomputedBucketSampler:
                                     map_location='cpu', weights_only=False)
 
         batch = Batch()
-        batch.ratio = entry['ratio']
+        batch.ratio = str(entry['ratio'])
         batch.vae_features = torch.stack(latents)
         batch.embeddings = embeddings
         # dreambooth: the trainer weights the loss of the class batches by dreambooth_lambda
@@ -507,7 +507,7 @@ class FeaturesPrecompute:
             files.append(filename)
 
         entry = {
-            'ratio': float(batch.ratio),
+            'ratio': str(batch.ratio),
             'emb_per_sample': emb_per_sample,
             'files': files,
         }
