@@ -12,7 +12,7 @@ from torch.optim.swa_utils import AveragedModel
 from diffusers import BitsAndBytesConfig, SanaTransformer2DModel
 import bitsandbytes
 import random
-from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import os
 from diffusers.training_utils import compute_density_for_timestep_sampling
 import math
@@ -457,15 +457,6 @@ class Model:
 
         self.load_optimizer_state()
 
-        warmup_steps = params.warmup_steps
-        self.warmup_scheduler = None
-        if warmup_steps != None:
-            def lr_lambda(current_step):
-                if current_step < warmup_steps:
-                    return float(current_step) / float(max(1, warmup_steps))
-                return 1.0
-            self.warmup_scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
-
         self.lr_schedulers = []
         self.loss_ema = None
         self.loss_ema_decay = 0.99
@@ -803,13 +794,9 @@ class Model:
                         if self.ema_model is not None:
                             self.ema_model.update_parameters(self.accelerator.unwrap_model(self.model))
 
-                        in_warmup = params.warmup_steps is not None and self.global_step < params.warmup_steps
-                        if in_warmup and self.warmup_scheduler is not None:
-                            self.warmup_scheduler.step()
-                        elif not in_warmup:
-                            for sched in self.lr_schedulers:
-                                if not isinstance(sched, ReduceLROnPlateau):
-                                    sched.step()
+                        for sched in self.lr_schedulers:
+                            if not isinstance(sched, ReduceLROnPlateau):
+                                sched.step()
 
                         self.optimizer.zero_grad()
                 
@@ -817,9 +804,8 @@ class Model:
                     mean_loss = self.accelerator.gather(avg_loss).mean()
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
 
-                    in_warmup = params.warmup_steps is not None and self.global_step < params.warmup_steps
                     metric_schedulers = [s for s in self.lr_schedulers if isinstance(s, ReduceLROnPlateau)]
-                    if not in_warmup and metric_schedulers:
+                    if metric_schedulers:
                         loss_val = mean_loss.item()
                         if self.loss_ema is None:
                             self.loss_ema = loss_val
@@ -856,7 +842,7 @@ class Model:
                                 self.logger.add_scalar('train/loss_ema', self.loss_ema, self.global_step)
                             for name, value in stream_losses.items():
                                 self.logger.add_scalar(name, value.item(), self.global_step)
-                            if self.warmup_scheduler is not None or self.lr_schedulers:
+                            if self.lr_schedulers:
                                 self.logger.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
                         except Exception as e:
                             print(f"[Warning] TensorBoard logging failed: {e}")

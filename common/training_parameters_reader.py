@@ -160,8 +160,6 @@ class TrainingParameters:
             self.urls = yaml_root['urls']
         elif 'local_shard_paths' not in yaml_root.keys():
             raise KeyError('the config needs urls, r2 settings or local_shard_paths')
-
-        self.warmup_steps = int(yaml_root['warmup_steps']) if 'warmup_steps' in yaml_root.keys() else None
         
         self.compute_features = False
         if 'compute_features' in yaml_root.keys():
