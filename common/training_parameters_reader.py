@@ -73,6 +73,8 @@ class TrainingParameters:
         self.cylic_lr_mode = None
         # lr scheduler config, as the raw content of the `lr_scheduler` section of the yaml
         self.lr_scheduler = None
+        # averaged model (EMA / SWA) config, as the raw content of the `averaged_model` section of the yaml
+        self.averaged_model = None
 
         # low vram
         self.low_vram = None
@@ -292,6 +294,10 @@ class TrainingParameters:
             self.lr_scheduler = dict(lr_scheduler_root)
             if 'type' not in self.lr_scheduler:
                 raise KeyError('the lr_scheduler section needs a type, such as ReduceLROnPlateau or torch.optim.lr_scheduler.CosineAnnealingLR')
+
+        averaged_model_root = typed_root.get('averaged_model')
+        if averaged_model_root:
+            self.averaged_model = dict(averaged_model_root)
 
         peft_root = typed_root.get('peft')
         if peft_root:

@@ -8,7 +8,7 @@ import tqdm
 import gc
 from peft import PeftConfig, get_peft_model, PeftModel
 import os
-from diffusers.training_utils import EMAModel
+from torch.optim.swa_utils import AveragedModel
 from diffusers import BitsAndBytesConfig, SanaTransformer2DModel
 import bitsandbytes
 import random
@@ -474,11 +474,10 @@ class Model:
             self.lr_scheduler, self.loss_ema_decay = self._build_lr_scheduler()
             self._lr_scheduler_uses_metric = isinstance(self.lr_scheduler, ReduceLROnPlateau)
 
-        # apply EMA
+        # apply AveragedModel (EMA / SWA)
         self.ema_model = None
-        if self.params.use_ema:
-            self.ema_model = EMAModel(self.model.parameters(), decay=0.999)
-            self.ema_model.to(self.accelerator.device)
+        if self.params.averaged_model is not None or self.params.use_ema:
+            self.ema_model = self._build_averaged_model()
         
         # check if we have timesteps, then apply a step callback
         # currently, we only support peft models at inference
@@ -561,6 +560,39 @@ class Model:
         module_name, cls_name = sched_path.rsplit('.', 1)
         sched_cls = getattr(importlib.import_module(module_name), cls_name)
         return sched_cls(self.optimizer, **sched_cfg), ema_decay
+
+    def _build_averaged_model(self):
+        """Instantiates `AveragedModel` from `params.averaged_model` (or `use_ema` fallback)."""
+        cfg = dict(self.params.averaged_model) if self.params.averaged_model is not None else {
+            'multi_avg_fn': {'type': 'get_ema_multi_avg_fn', 'decay': 0.999}
+        }
+        for fn_key in ('avg_fn', 'multi_avg_fn'):
+            if isinstance(cfg.get(fn_key), dict):
+                fn_cfg = dict(cfg[fn_key])
+                fn_type = fn_cfg.pop('type')
+                fn_path = fn_type if '.' in fn_type else f'torch.optim.swa_utils.{fn_type}'
+                module_name, attr_name = fn_path.rsplit('.', 1)
+                fn_factory = getattr(importlib.import_module(module_name), attr_name)
+                cfg[fn_key] = fn_factory(**fn_cfg)
+        cfg.setdefault('device', self.accelerator.device)
+        return AveragedModel(self.accelerator.unwrap_model(self.model), **cfg)
+
+    def _swap_in_ema_weights(self):
+        """Stores current unwrapped model parameters on CPU and copies `ema_model` parameters in."""
+        unwrapped = self.accelerator.unwrap_model(self.model)
+        saved = []
+        with torch.no_grad():
+            for p, ema_p in zip(unwrapped.parameters(), self.ema_model.module.parameters()):
+                saved.append(p.data.detach().clone().cpu())
+                p.data.copy_(ema_p.data.to(device=p.device, dtype=p.dtype))
+        return saved
+
+    def _restore_ema_weights(self, saved):
+        """Restores the original unwrapped model parameters saved by `_swap_in_ema_weights`."""
+        unwrapped = self.accelerator.unwrap_model(self.model)
+        with torch.no_grad():
+            for p, orig in zip(unwrapped.parameters(), saved):
+                p.data.copy_(orig.to(device=p.device, dtype=p.dtype))
 
     def optimizer_state_path(self, directory):
         return os.path.join(directory, 'optimizer.pt')
@@ -752,8 +784,8 @@ class Model:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                         self.optimizer.step()
 
-                        if self.ema_model != None:
-                            self.ema_model.step(self.model.parameters())
+                        if self.ema_model is not None:
+                            self.ema_model.update_parameters(self.accelerator.unwrap_model(self.model))
 
                         in_warmup = params.warmup_steps is not None and self.global_step < params.warmup_steps
                         if in_warmup and self.warmup_scheduler is not None:
@@ -806,16 +838,15 @@ class Model:
                     if self.global_step % params.num_steps_per_validation == 0:
                         with torch.no_grad():
                             # ✅ Run reduction on ALL processes to sync EMA parameters
-                            if self.ema_model != None:
-                                for param in self.ema_model.shadow_params:
-                                    if self.params.dual_gpu == False:
-                                        param.data = self.accelerator.reduce(param.data, reduction="mean")
+                            if self.ema_model is not None and self.params.dual_gpu == False and self.accelerator.num_processes > 1:
+                                for param in self.ema_model.module.parameters():
+                                    param.data = self.accelerator.reduce(param.data, reduction="mean")
                     
                             # ✅ Ensure store() is called before restore()
                             if self.accelerator.is_main_process:
-                                if self.ema_model != None:
-                                    self.ema_model.store(self.model.parameters())  # Store original model weights
-                                    self.ema_model.copy_to(self.model.parameters())
+                                saved_weights = None
+                                if self.ema_model is not None:
+                                    saved_weights = self._swap_in_ema_weights()
                                 
                                 # we need to check if we temporarly disable the peft adapter for the first inference step
                                 if len(self.timesteps) != 0:
@@ -847,8 +878,8 @@ class Model:
                                 self.save_model()
                                 self.save_optimizer_state()
                     
-                                if self.ema_model != None:
-                                    self.ema_model.restore(self.model.parameters())
+                                if saved_weights is not None:
+                                    self._restore_ema_weights(saved_weights)
                     progress_bar.update(1)
                     self.global_step = self.global_step + 1
 
