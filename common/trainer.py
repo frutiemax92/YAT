@@ -606,6 +606,16 @@ class Model:
             for p, orig in zip(unwrapped.parameters(), saved):
                 p.data.copy_(orig.to(device=p.device, dtype=p.dtype))
 
+    def _sync_ema_parameters(self):
+        """Averages trainable floating-point EMA parameters across processes, staging CPU tensors on the accelerator device."""
+        for param in self.ema_model.module.parameters():
+            if not param.requires_grad or not param.is_floating_point():
+                continue
+            orig_device = param.device
+            tensor = param.data if orig_device == self.accelerator.device else param.data.to(self.accelerator.device)
+            reduced = self.accelerator.reduce(tensor, reduction="mean")
+            param.data.copy_(reduced.to(orig_device))
+
     def optimizer_state_path(self, directory):
         return os.path.join(directory, 'optimizer.pt')
 
@@ -856,8 +866,7 @@ class Model:
                         with torch.no_grad():
                             # ✅ Run reduction on ALL processes to sync EMA parameters
                             if self.ema_model is not None and self.params.dual_gpu == False and self.accelerator.num_processes > 1:
-                                for param in self.ema_model.module.parameters():
-                                    param.data = self.accelerator.reduce(param.data, reduction="mean")
+                                self._sync_ema_parameters()
                     
                             # ✅ Ensure store() is called before restore()
                             if self.accelerator.is_main_process:
