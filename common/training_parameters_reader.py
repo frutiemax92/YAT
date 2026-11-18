@@ -291,9 +291,13 @@ class TrainingParameters:
 
         lr_scheduler_root = typed_root.get('lr_scheduler')
         if lr_scheduler_root:
-            self.lr_scheduler = dict(lr_scheduler_root)
-            if 'type' not in self.lr_scheduler:
-                raise KeyError('the lr_scheduler section needs a type, such as ReduceLROnPlateau or torch.optim.lr_scheduler.CosineAnnealingLR')
+            if isinstance(lr_scheduler_root, list):
+                self.lr_scheduler = [dict(item) for item in lr_scheduler_root]
+            else:
+                self.lr_scheduler = [dict(lr_scheduler_root)]
+            for sched_cfg in self.lr_scheduler:
+                if 'type' not in sched_cfg:
+                    raise KeyError('each lr_scheduler entry needs a type, such as ReduceLROnPlateau or torch.optim.lr_scheduler.CosineAnnealingLR')
 
         averaged_model_root = typed_root.get('averaged_model')
         if averaged_model_root:

@@ -466,13 +466,11 @@ class Model:
                 return 1.0
             self.warmup_scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
 
-        self.lr_scheduler = None
+        self.lr_schedulers = []
         self.loss_ema = None
         self.loss_ema_decay = 0.99
-        self._lr_scheduler_uses_metric = False
         if self.params.lr_scheduler is not None:
-            self.lr_scheduler, self.loss_ema_decay = self._build_lr_scheduler()
-            self._lr_scheduler_uses_metric = isinstance(self.lr_scheduler, ReduceLROnPlateau)
+            self.lr_schedulers, self.loss_ema_decay = self._build_lr_schedulers()
 
         # apply AveragedModel (EMA / SWA)
         self.ema_model = None
@@ -551,15 +549,33 @@ class Model:
         opt_cfg.setdefault('weight_decay', self.params.weight_decay)
         return opt_cls(params_to_optimizer, **opt_cfg)
 
-    def _build_lr_scheduler(self):
-        """Instantiates the LR scheduler named in `params.lr_scheduler` with its remaining keys as kwargs."""
-        sched_cfg = dict(self.params.lr_scheduler)
+    def _build_single_lr_scheduler(self, cfg):
+        """Instantiates one LR scheduler dict, recursively building nested `schedulers` if present."""
+        sched_cfg = dict(cfg)
         sched_type = sched_cfg.pop('type')
-        ema_decay = float(sched_cfg.pop('ema_decay', 0.99))
+        ema_decay = sched_cfg.pop('ema_decay', None)
+        if isinstance(sched_cfg.get('schedulers'), list):
+            sched_cfg['schedulers'] = [
+                self._build_single_lr_scheduler(child)[0] for child in sched_cfg['schedulers']
+            ]
         sched_path = sched_type if '.' in sched_type else f'torch.optim.lr_scheduler.{sched_type}'
         module_name, cls_name = sched_path.rsplit('.', 1)
         sched_cls = getattr(importlib.import_module(module_name), cls_name)
+        if sched_cls is torch.optim.lr_scheduler.ChainedScheduler:
+            return sched_cls(**sched_cfg), ema_decay
         return sched_cls(self.optimizer, **sched_cfg), ema_decay
+
+    def _build_lr_schedulers(self):
+        """Instantiates the list of LR schedulers from `params.lr_scheduler`."""
+        configs = self.params.lr_scheduler if isinstance(self.params.lr_scheduler, list) else [self.params.lr_scheduler]
+        schedulers = []
+        ema_decay = 0.99
+        for cfg in configs:
+            sched, cfg_decay = self._build_single_lr_scheduler(cfg)
+            schedulers.append(sched)
+            if cfg_decay is not None:
+                ema_decay = float(cfg_decay)
+        return schedulers, ema_decay
 
     def _build_averaged_model(self):
         """Instantiates `AveragedModel` from `params.averaged_model` (or `use_ema` fallback)."""
@@ -790,8 +806,10 @@ class Model:
                         in_warmup = params.warmup_steps is not None and self.global_step < params.warmup_steps
                         if in_warmup and self.warmup_scheduler is not None:
                             self.warmup_scheduler.step()
-                        elif not in_warmup and self.lr_scheduler is not None and not self._lr_scheduler_uses_metric:
-                            self.lr_scheduler.step()
+                        elif not in_warmup:
+                            for sched in self.lr_schedulers:
+                                if not isinstance(sched, ReduceLROnPlateau):
+                                    sched.step()
 
                         self.optimizer.zero_grad()
                 
@@ -800,7 +818,8 @@ class Model:
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
 
                     in_warmup = params.warmup_steps is not None and self.global_step < params.warmup_steps
-                    if not in_warmup and self.lr_scheduler is not None and self._lr_scheduler_uses_metric:
+                    metric_schedulers = [s for s in self.lr_schedulers if isinstance(s, ReduceLROnPlateau)]
+                    if not in_warmup and metric_schedulers:
                         loss_val = mean_loss.item()
                         if self.loss_ema is None:
                             self.loss_ema = loss_val
@@ -808,10 +827,17 @@ class Model:
                             self.loss_ema = self.loss_ema_decay * self.loss_ema + (1.0 - self.loss_ema_decay) * loss_val
 
                         prev_lr = self.optimizer.param_groups[0]['lr']
-                        self.lr_scheduler.step(self.loss_ema)
+                        for sched in metric_schedulers:
+                            sched.step(self.loss_ema)
                         new_lr = self.optimizer.param_groups[0]['lr']
-                        if new_lr < prev_lr and self.accelerator.is_main_process:
-                            print(f'[LRScheduler] step {self.global_step}: lr {prev_lr:.3e} -> {new_lr:.3e} (loss_ema={self.loss_ema:.5f})')
+                        if new_lr < prev_lr:
+                            if prev_lr > 0:
+                                ratio = new_lr / prev_lr
+                                for sched in self.lr_schedulers:
+                                    if hasattr(sched, 'base_lrs'):
+                                        sched.base_lrs = [lr * ratio for lr in sched.base_lrs]
+                            if self.accelerator.is_main_process:
+                                print(f'[LRScheduler] step {self.global_step}: lr {prev_lr:.3e} -> {new_lr:.3e} (loss_ema={self.loss_ema:.5f})')
 
                     # dreambooth: both halves of the loss, to see which one is not converging
                     stream_losses = {}
@@ -830,7 +856,7 @@ class Model:
                                 self.logger.add_scalar('train/loss_ema', self.loss_ema, self.global_step)
                             for name, value in stream_losses.items():
                                 self.logger.add_scalar(name, value.item(), self.global_step)
-                            if self.warmup_scheduler is not None or self.lr_scheduler is not None:
+                            if self.warmup_scheduler is not None or self.lr_schedulers:
                                 self.logger.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
                         except Exception as e:
                             print(f"[Warning] TensorBoard logging failed: {e}")
