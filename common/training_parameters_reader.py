@@ -70,7 +70,14 @@ class TrainingParameters:
         self.cyclic_lr_max_lr = None
         self.cyclic_lr_step_size_up = None
         self.cyclic_lr_step_size_down = None
-        self.cylic_lr_mode = None 
+        self.cylic_lr_mode = None
+        self.plateau_lr_patience = None
+        self.plateau_lr_factor = 0.5
+        self.plateau_lr_threshold = 1e-3
+        self.plateau_lr_threshold_mode = 'rel'
+        self.plateau_lr_cooldown = 0
+        self.plateau_lr_min_lr = 1e-6
+        self.plateau_lr_ema_decay = 0.99
 
         # low vram
         self.low_vram = None
@@ -240,6 +247,21 @@ class TrainingParameters:
                 self.cyclic_lr_step_size_down = int(yaml_root['cyclic_lr_step_size_down'])
             if 'cylic_lr_mode' in yaml_root.keys():
                 self.cylic_lr_mode = yaml_root['cylic_lr_mode']
+
+        if 'plateau_lr_patience' in yaml_root and yaml_root['plateau_lr_patience'] is not None:
+            self.plateau_lr_patience = int(yaml_root['plateau_lr_patience'])
+        if 'plateau_lr_factor' in yaml_root:
+            self.plateau_lr_factor = float(yaml_root['plateau_lr_factor'])
+        if 'plateau_lr_threshold' in yaml_root:
+            self.plateau_lr_threshold = float(yaml_root['plateau_lr_threshold'])
+        if 'plateau_lr_threshold_mode' in yaml_root:
+            self.plateau_lr_threshold_mode = str(yaml_root['plateau_lr_threshold_mode'])
+        if 'plateau_lr_cooldown' in yaml_root:
+            self.plateau_lr_cooldown = int(yaml_root['plateau_lr_cooldown'])
+        if 'plateau_lr_min_lr' in yaml_root:
+            self.plateau_lr_min_lr = float(yaml_root['plateau_lr_min_lr'])
+        if 'plateau_lr_ema_decay' in yaml_root:
+            self.plateau_lr_ema_decay = float(yaml_root['plateau_lr_ema_decay'])
         
         self.huggingface_dataset_repo = None
         if 'huggingface_dataset_repo' in yaml_root.keys():

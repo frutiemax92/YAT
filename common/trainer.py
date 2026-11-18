@@ -12,7 +12,7 @@ from diffusers.training_utils import EMAModel
 from diffusers import BitsAndBytesConfig, SanaTransformer2DModel
 import bitsandbytes
 import random
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
 import os
 from diffusers.training_utils import compute_density_for_timestep_sampling
 import math
@@ -466,6 +466,20 @@ class Model:
                 return 1.0
             self.lr_scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
 
+        self.plateau_scheduler = None
+        self.loss_ema = None
+        if params.plateau_lr_patience is not None:
+            self.plateau_scheduler = ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                factor=params.plateau_lr_factor,
+                patience=params.plateau_lr_patience,
+                threshold=params.plateau_lr_threshold,
+                threshold_mode=params.plateau_lr_threshold_mode,
+                cooldown=params.plateau_lr_cooldown,
+                min_lr=params.plateau_lr_min_lr,
+            )
+
         # apply EMA
         self.ema_model = None
         if self.params.use_ema:
@@ -737,7 +751,7 @@ class Model:
                         if self.ema_model != None:
                             self.ema_model.step(self.model.parameters())
 
-                        if self.lr_scheduler != None:
+                        if self.lr_scheduler != None and (params.warmup_steps is None or self.global_step < params.warmup_steps):
                             self.lr_scheduler.step()
 
                         self.optimizer.zero_grad()
@@ -745,6 +759,20 @@ class Model:
                 if self.accelerator.sync_gradients:
                     mean_loss = self.accelerator.gather(avg_loss).mean()
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
+
+                    if self.plateau_scheduler is not None and (params.warmup_steps is None or self.global_step >= params.warmup_steps):
+                        loss_val = mean_loss.item()
+                        if self.loss_ema is None:
+                            self.loss_ema = loss_val
+                        else:
+                            decay = params.plateau_lr_ema_decay
+                            self.loss_ema = decay * self.loss_ema + (1.0 - decay) * loss_val
+
+                        prev_lr = self.optimizer.param_groups[0]['lr']
+                        self.plateau_scheduler.step(self.loss_ema)
+                        new_lr = self.optimizer.param_groups[0]['lr']
+                        if new_lr < prev_lr and self.accelerator.is_main_process:
+                            print(f'[PlateauLR] step {self.global_step}: lr {prev_lr:.3e} -> {new_lr:.3e} (loss_ema={self.loss_ema:.5f})')
 
                     # dreambooth: both halves of the loss, to see which one is not converging
                     stream_losses = {}
@@ -759,11 +787,12 @@ class Model:
                     if self.logger != None and self.accelerator.is_main_process:
                         try:
                             self.logger.add_scalar('train/loss', mean_loss.item(), self.global_step)
+                            if self.loss_ema is not None:
+                                self.logger.add_scalar('train/loss_ema', self.loss_ema, self.global_step)
                             for name, value in stream_losses.items():
                                 self.logger.add_scalar(name, value.item(), self.global_step)
-                            if self.lr_scheduler != None:
-                                last_lr = self.lr_scheduler.get_last_lr()
-                                self.logger.add_scalar('train/lr', last_lr[0], self.global_step)
+                            if self.lr_scheduler != None or self.plateau_scheduler is not None:
+                                self.logger.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
                         except Exception as e:
                             print(f"[Warning] TensorBoard logging failed: {e}")
 
