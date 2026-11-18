@@ -375,7 +375,6 @@ def cache_signature(params):
     signature = {
         'batch_size': params.batch_size,
         'use_repa': bool(params.use_repa),
-        'dataset_seed': params.dataset_seed,
         # this one decides the resolution of the cached latents
         'aspect_ratios': getattr(params, 'aspect_ratios', None),
     }

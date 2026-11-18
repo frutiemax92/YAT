@@ -1,6 +1,7 @@
 import glob
 import os
 import json
+import secrets
 import yaml
 import huggingface_hub
 
@@ -35,7 +36,7 @@ class TrainingParameters:
         self.r2_secret_key = None
         self.r2_bucket_name = None
         self.r2_tar_files = None
-        self.dataset_seed = 0
+        self.dataset_seed = secrets.randbelow(2**31)
 
         self.batch_size = 4
         self.pretrained_pipe_path = None
@@ -177,8 +178,6 @@ class TrainingParameters:
         if 'url_probs' in yaml_root.keys():
             self.url_probs = [float(prob) for prob in yaml_root['url_probs']]
         
-        if 'dataset_seed' in yaml_root.keys():
-            self.dataset_seed = int(yaml_root['dataset_seed'])
         self.extract_features = 'extract_features' in yaml_root.keys()
         
         self.batch_size = int(yaml_root['batch_size'])

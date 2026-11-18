@@ -62,6 +62,11 @@ class Model:
         self.process_index = self.accelerator.process_index
         self.num_processes = self.accelerator.num_processes
 
+        if self.num_processes > 1:
+            seed_tensor = torch.tensor(params.dataset_seed, dtype=torch.int64, device=self.accelerator.device)
+            torch.distributed.broadcast(seed_tensor, src=0)
+            params.dataset_seed = int(seed_tensor.item())
+
         # draws the training timesteps and noise. Created once so its state advances from a step to
         # the next, and seeded apart on every gpu so they don't all train at the same timestep
         self.noise_generator = torch.Generator().manual_seed(params.dataset_seed + self.process_index)

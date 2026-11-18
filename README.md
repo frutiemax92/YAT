@@ -65,7 +65,6 @@ removing the line is what disables it.
 - `r2_dataset_folder` : the folder inside the bucket that holds the dataset shards. The trainer builds the shard names itself as `shard-000000.tar`, `shard-000001.tar`, and so on.
 - `num_shards` : how many shards that folder contains. The range is split evenly between the GPUs, so each process downloads from its own slice of the dataset.
 - `local_shard_paths` : a list of TAR files already downloaded on the machine. When it is set, the shards are picked from that list instead of being downloaded from r2, which is the most stable option.
-- `dataset_seed` : the seed used to pick the shards and to shuffle the samples. It also decides the order the precalculated features are replayed in.
 - `r2_tar_files` : a list of TAR files that will form your dataset. There will be randomly sampled with equal weights. It comes from the older dataset layout and is superseded by `r2_dataset_folder` and `num_shards`, which is what the trainer reads now.
 - `urls` : contains the public urls that point to the TAR files in the form of WebDataset. Same thing, it is read from the config but no longer used.
 
