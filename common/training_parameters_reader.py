@@ -54,6 +54,8 @@ class TrainingParameters:
         self.lora_base_model_8bit = None
         self.lora_base_model_4bit = None
         self.use_adamw_8bit = False
+        # optimizer config, as the raw content of the `optimizer` section of the yaml (None: use use_adamw_8bit fallback)
+        self.optimizer = None
         self.offload_to_cpu = False
         self.offload_percentage = 100.0
         self.text_encoder_4bit = False
@@ -276,7 +278,14 @@ class TrainingParameters:
         # autocast_adapter_dtype: false keeps the adapters in bfloat16 instead of the float32 peft casts them
         # to. That halves what dora has to materialize to compute its weight norm, which is what makes dora
         # fit at all on a small card
-        peft_root = yaml.safe_load(contents).get('peft')
+        typed_root = yaml.safe_load(contents)
+        optimizer_root = typed_root.get('optimizer')
+        if optimizer_root:
+            self.optimizer = dict(optimizer_root)
+            if 'type' not in self.optimizer:
+                raise KeyError('the optimizer section needs a type, such as torch.optim.AdamW or bitsandbytes.optim.Lion8bit')
+
+        peft_root = typed_root.get('peft')
         if peft_root:
             self.peft = dict(peft_root)
             if 'peft_type' not in self.peft:

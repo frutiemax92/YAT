@@ -18,6 +18,7 @@ from diffusers.training_utils import compute_density_for_timestep_sampling
 import math
 import copy
 import contextlib
+import importlib
 from common.repa import RepaModel, RepaConfig
 from common.precompute import FeaturesPrecompute
 from common.text_precompute import TextEmbeddingsPrecompute
@@ -427,7 +428,9 @@ class Model:
         params_to_optimizer = [parameter for parameter in self.model.parameters()
                                if parameter.requires_grad]
 
-        if self.params.use_adamw_8bit == False:
+        if self.params.optimizer is not None:
+            self.optimizer = self._build_optimizer(params_to_optimizer)
+        elif self.params.use_adamw_8bit == False:
             self.optimizer = torch.optim.AdamW(params_to_optimizer,
                                                 lr=params.learning_rate,
                                                 weight_decay=params.weight_decay)
@@ -518,6 +521,28 @@ class Model:
 
     def repa_loss(self, batch):
         return 0.0
+
+    _OPTIMIZER_ALIASES = {
+        'AdamW': 'torch.optim.AdamW',
+        'AdamW8bit': 'bitsandbytes.optim.AdamW8bit',
+        'Adam8bit': 'bitsandbytes.optim.Adam8bit',
+        'Lion8bit': 'bitsandbytes.optim.Lion8bit',
+    }
+
+    def _build_optimizer(self, params_to_optimizer):
+        """Instantiates the optimizer named in `params.optimizer` with its remaining keys as kwargs."""
+        opt_cfg = dict(self.params.optimizer)
+        opt_type = opt_cfg.pop('type')
+        opt_path = self._OPTIMIZER_ALIASES.get(opt_type, opt_type)
+        if '.' not in opt_path:
+            raise ValueError(
+                f'Unknown optimizer {opt_type!r}: use a dotted class path such as torch.optim.AdamW'
+            )
+        module_name, cls_name = opt_path.rsplit('.', 1)
+        opt_cls = getattr(importlib.import_module(module_name), cls_name)
+        opt_cfg.setdefault('lr', self.params.learning_rate)
+        opt_cfg.setdefault('weight_decay', self.params.weight_decay)
+        return opt_cls(params_to_optimizer, **opt_cfg)
 
     def optimizer_state_path(self, directory):
         return os.path.join(directory, 'optimizer.pt')
