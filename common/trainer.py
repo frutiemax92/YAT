@@ -458,27 +458,21 @@ class Model:
         self.load_optimizer_state()
 
         warmup_steps = params.warmup_steps
-        self.lr_scheduler = None
+        self.warmup_scheduler = None
         if warmup_steps != None:
             def lr_lambda(current_step):
                 if current_step < warmup_steps:
                     return float(current_step) / float(max(1, warmup_steps))
                 return 1.0
-            self.lr_scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
+            self.warmup_scheduler = LambdaLR(self.optimizer, lr_lambda=lr_lambda)
 
-        self.plateau_scheduler = None
+        self.lr_scheduler = None
         self.loss_ema = None
-        if params.plateau_lr_patience is not None:
-            self.plateau_scheduler = ReduceLROnPlateau(
-                self.optimizer,
-                mode='min',
-                factor=params.plateau_lr_factor,
-                patience=params.plateau_lr_patience,
-                threshold=params.plateau_lr_threshold,
-                threshold_mode=params.plateau_lr_threshold_mode,
-                cooldown=params.plateau_lr_cooldown,
-                min_lr=params.plateau_lr_min_lr,
-            )
+        self.loss_ema_decay = 0.99
+        self._lr_scheduler_uses_metric = False
+        if self.params.lr_scheduler is not None:
+            self.lr_scheduler, self.loss_ema_decay = self._build_lr_scheduler()
+            self._lr_scheduler_uses_metric = isinstance(self.lr_scheduler, ReduceLROnPlateau)
 
         # apply EMA
         self.ema_model = None
@@ -557,6 +551,16 @@ class Model:
         opt_cfg.setdefault('lr', self.params.learning_rate)
         opt_cfg.setdefault('weight_decay', self.params.weight_decay)
         return opt_cls(params_to_optimizer, **opt_cfg)
+
+    def _build_lr_scheduler(self):
+        """Instantiates the LR scheduler named in `params.lr_scheduler` with its remaining keys as kwargs."""
+        sched_cfg = dict(self.params.lr_scheduler)
+        sched_type = sched_cfg.pop('type')
+        ema_decay = float(sched_cfg.pop('ema_decay', 0.99))
+        sched_path = sched_type if '.' in sched_type else f'torch.optim.lr_scheduler.{sched_type}'
+        module_name, cls_name = sched_path.rsplit('.', 1)
+        sched_cls = getattr(importlib.import_module(module_name), cls_name)
+        return sched_cls(self.optimizer, **sched_cfg), ema_decay
 
     def optimizer_state_path(self, directory):
         return os.path.join(directory, 'optimizer.pt')
@@ -751,7 +755,10 @@ class Model:
                         if self.ema_model != None:
                             self.ema_model.step(self.model.parameters())
 
-                        if self.lr_scheduler != None and (params.warmup_steps is None or self.global_step < params.warmup_steps):
+                        in_warmup = params.warmup_steps is not None and self.global_step < params.warmup_steps
+                        if in_warmup and self.warmup_scheduler is not None:
+                            self.warmup_scheduler.step()
+                        elif not in_warmup and self.lr_scheduler is not None and not self._lr_scheduler_uses_metric:
                             self.lr_scheduler.step()
 
                         self.optimizer.zero_grad()
@@ -760,19 +767,19 @@ class Model:
                     mean_loss = self.accelerator.gather(avg_loss).mean()
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
 
-                    if self.plateau_scheduler is not None and (params.warmup_steps is None or self.global_step >= params.warmup_steps):
+                    in_warmup = params.warmup_steps is not None and self.global_step < params.warmup_steps
+                    if not in_warmup and self.lr_scheduler is not None and self._lr_scheduler_uses_metric:
                         loss_val = mean_loss.item()
                         if self.loss_ema is None:
                             self.loss_ema = loss_val
                         else:
-                            decay = params.plateau_lr_ema_decay
-                            self.loss_ema = decay * self.loss_ema + (1.0 - decay) * loss_val
+                            self.loss_ema = self.loss_ema_decay * self.loss_ema + (1.0 - self.loss_ema_decay) * loss_val
 
                         prev_lr = self.optimizer.param_groups[0]['lr']
-                        self.plateau_scheduler.step(self.loss_ema)
+                        self.lr_scheduler.step(self.loss_ema)
                         new_lr = self.optimizer.param_groups[0]['lr']
                         if new_lr < prev_lr and self.accelerator.is_main_process:
-                            print(f'[PlateauLR] step {self.global_step}: lr {prev_lr:.3e} -> {new_lr:.3e} (loss_ema={self.loss_ema:.5f})')
+                            print(f'[LRScheduler] step {self.global_step}: lr {prev_lr:.3e} -> {new_lr:.3e} (loss_ema={self.loss_ema:.5f})')
 
                     # dreambooth: both halves of the loss, to see which one is not converging
                     stream_losses = {}
@@ -791,7 +798,7 @@ class Model:
                                 self.logger.add_scalar('train/loss_ema', self.loss_ema, self.global_step)
                             for name, value in stream_losses.items():
                                 self.logger.add_scalar(name, value.item(), self.global_step)
-                            if self.lr_scheduler != None or self.plateau_scheduler is not None:
+                            if self.warmup_scheduler is not None or self.lr_scheduler is not None:
                                 self.logger.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.global_step)
                         except Exception as e:
                             print(f"[Warning] TensorBoard logging failed: {e}")
