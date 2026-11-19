@@ -819,13 +819,14 @@ class Model:
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
 
                     metric_schedulers = [s for s in self.lr_schedulers if isinstance(s, ReduceLROnPlateau)]
-                    if metric_schedulers:
+                    if self.ema_model is not None or metric_schedulers:
                         loss_val = mean_loss.item()
                         if self.loss_ema is None:
                             self.loss_ema = loss_val
                         else:
                             self.loss_ema = self.loss_ema_decay * self.loss_ema + (1.0 - self.loss_ema_decay) * loss_val
 
+                    if metric_schedulers:
                         prev_lr = self.optimizer.param_groups[0]['lr']
                         for sched in metric_schedulers:
                             sched.step(self.loss_ema)
