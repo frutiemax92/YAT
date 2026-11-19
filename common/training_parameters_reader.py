@@ -220,10 +220,6 @@ class TrainingParameters:
         else:
             self.gradient_accumulation_steps = 1
         
-        self.use_ema = False
-        if 'use_ema' in yaml_root.keys():
-            self.use_ema = True
-        
         # train using unconditional steps probability
         self.train_unconditional_prob = 0.0
         if 'train_unconditional_prob' in yaml_root.keys():

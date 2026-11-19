@@ -470,7 +470,7 @@ class Model:
 
         # apply AveragedModel (EMA / SWA)
         self.ema_model = None
-        if self.params.averaged_model is not None or self.params.use_ema:
+        if self.params.averaged_model is not None:
             self.ema_model = self._build_averaged_model()
         
         # check if we have timesteps, then apply a step callback
@@ -566,21 +566,17 @@ class Model:
         return [self._build_single_lr_scheduler(cfg) for cfg in configs]
 
     def _resolve_loss_ema_decay(self):
-        """Derives the loss EMA decay from `params.averaged_model` (falling back to 0.999 for `use_ema`, else 0.99)."""
+        """Derives the loss EMA decay from `params.averaged_model` (falling back to 0.99)."""
         if isinstance(self.params.averaged_model, dict):
             for fn_key in ('multi_avg_fn', 'avg_fn'):
                 fn_cfg = self.params.averaged_model.get(fn_key)
                 if isinstance(fn_cfg, dict) and 'decay' in fn_cfg:
                     return float(fn_cfg['decay'])
-        if self.params.use_ema:
-            return 0.999
         return 0.99
 
     def _build_averaged_model(self):
-        """Instantiates `AveragedModel` from `params.averaged_model` (or `use_ema` fallback)."""
-        cfg = dict(self.params.averaged_model) if self.params.averaged_model is not None else {
-            'multi_avg_fn': {'type': 'get_ema_multi_avg_fn', 'decay': 0.999}
-        }
+        """Instantiates `AveragedModel` from `params.averaged_model`."""
+        cfg = dict(self.params.averaged_model)
         for fn_key in ('avg_fn', 'multi_avg_fn'):
             if isinstance(cfg.get(fn_key), dict):
                 fn_cfg = dict(cfg[fn_key])

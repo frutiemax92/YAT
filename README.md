@@ -53,7 +53,7 @@ The model will be saved for each validation, which is defined by the `num_steps_
 ## List of parameters in the config file
 
 Here is the current list of parameters in the config file. Every option is optional unless stated
-otherwise; a boolean option is enabled by simply being present in the file (`use_ema: True`), and
+otherwise; a boolean option is enabled by simply being present in the file (`bfloat16: True`), and
 removing the line is what disables it.
 
 ### Dataset
@@ -79,7 +79,7 @@ removing the line is what disables it.
 - `gradient_accumulation_steps` : the gradient accumulation steps, which will increase the effective batch size at the cost of slower training.
 - `bfloat16` : do the training entirely in bfloat16. This is highly suggested for saving VRAM; it takes a boolean value (true of false).
 - `use_adamw_8bit` : use the 8 bit Lion optimizer from bitsandbytes instead of AdamW, which saves VRAM on the optimizer states.
-- `use_ema` : keep an exponential moving average of the weights (decay `0.999`) and validate and save from it instead of the raw weights.
+- `averaged_model` : configure PyTorch's `AveragedModel` (EMA / SWA) to maintain averaged weights for validation and saving, and to set the loss EMA decay used by `ReduceLROnPlateau`.
 - `train_unconditional_prob` : the probability that a batch is trained with the empty prompt embedding instead of its own captions, which trains the unconditional branch used by classifier-free guidance.
 - `timesteps` : a list of timestep indices to restrict the training to, instead of sampling them from the usual distribution. This is how a refiner model is trained: the lora is also disabled at validation for the timesteps that are not in the list.
 - `aspect_ratio` : a list of the resolutions to train at, e.g. `[512, 1024]`. `512` and `1024` select the standard aspect ratio tables, any other value scales the 1024 table by `resolution / 1024`. Each image is assigned one of the resolutions at random, and a batch only holds images of the same aspect ratio and the same resolution. A single number is still accepted and means a list of one resolution.
