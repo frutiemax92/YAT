@@ -464,9 +464,9 @@ class Model:
 
         self.lr_schedulers = []
         self.loss_ema = None
-        self.loss_ema_decay = 0.99
+        self.loss_ema_decay = self._resolve_loss_ema_decay()
         if self.params.lr_scheduler is not None:
-            self.lr_schedulers, self.loss_ema_decay = self._build_lr_schedulers()
+            self.lr_schedulers = self._build_lr_schedulers()
 
         # apply AveragedModel (EMA / SWA)
         self.ema_model = None
@@ -549,29 +549,32 @@ class Model:
         """Instantiates one LR scheduler dict, recursively building nested `schedulers` if present."""
         sched_cfg = dict(cfg)
         sched_type = sched_cfg.pop('type')
-        ema_decay = sched_cfg.pop('ema_decay', None)
         if isinstance(sched_cfg.get('schedulers'), list):
             sched_cfg['schedulers'] = [
-                self._build_single_lr_scheduler(child)[0] for child in sched_cfg['schedulers']
+                self._build_single_lr_scheduler(child) for child in sched_cfg['schedulers']
             ]
         sched_path = sched_type if '.' in sched_type else f'torch.optim.lr_scheduler.{sched_type}'
         module_name, cls_name = sched_path.rsplit('.', 1)
         sched_cls = getattr(importlib.import_module(module_name), cls_name)
         if sched_cls is torch.optim.lr_scheduler.ChainedScheduler:
-            return sched_cls(**sched_cfg), ema_decay
-        return sched_cls(self.optimizer, **sched_cfg), ema_decay
+            return sched_cls(**sched_cfg)
+        return sched_cls(self.optimizer, **sched_cfg)
 
     def _build_lr_schedulers(self):
         """Instantiates the list of LR schedulers from `params.lr_scheduler`."""
         configs = self.params.lr_scheduler if isinstance(self.params.lr_scheduler, list) else [self.params.lr_scheduler]
-        schedulers = []
-        ema_decay = 0.99
-        for cfg in configs:
-            sched, cfg_decay = self._build_single_lr_scheduler(cfg)
-            schedulers.append(sched)
-            if cfg_decay is not None:
-                ema_decay = float(cfg_decay)
-        return schedulers, ema_decay
+        return [self._build_single_lr_scheduler(cfg) for cfg in configs]
+
+    def _resolve_loss_ema_decay(self):
+        """Derives the loss EMA decay from `params.averaged_model` (falling back to 0.999 for `use_ema`, else 0.99)."""
+        if isinstance(self.params.averaged_model, dict):
+            for fn_key in ('multi_avg_fn', 'avg_fn'):
+                fn_cfg = self.params.averaged_model.get(fn_key)
+                if isinstance(fn_cfg, dict) and 'decay' in fn_cfg:
+                    return float(fn_cfg['decay'])
+        if self.params.use_ema:
+            return 0.999
+        return 0.99
 
     def _build_averaged_model(self):
         """Instantiates `AveragedModel` from `params.averaged_model` (or `use_ema` fallback)."""
