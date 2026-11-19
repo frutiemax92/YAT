@@ -818,18 +818,20 @@ class Model:
                     mean_loss = self.accelerator.gather(avg_loss).mean()
                     avg_loss = torch.tensor(0, device=self.accelerator.device)
 
-                    metric_schedulers = [s for s in self.lr_schedulers if isinstance(s, ReduceLROnPlateau)]
-                    if self.ema_model is not None or metric_schedulers:
-                        loss_val = mean_loss.item()
+                    loss_val = mean_loss.item()
+                    if self.ema_model is not None:
                         if self.loss_ema is None:
                             self.loss_ema = loss_val
                         else:
                             self.loss_ema = self.loss_ema_decay * self.loss_ema + (1.0 - self.loss_ema_decay) * loss_val
 
+                    metric_schedulers = [s for s in self.lr_schedulers if isinstance(s, ReduceLROnPlateau)]
                     if metric_schedulers:
+                        metric = self.loss_ema if self.loss_ema is not None else loss_val
+                        metric_name = 'loss_ema' if self.loss_ema is not None else 'loss'
                         prev_lr = self.optimizer.param_groups[0]['lr']
                         for sched in metric_schedulers:
-                            sched.step(self.loss_ema)
+                            sched.step(metric)
                         new_lr = self.optimizer.param_groups[0]['lr']
                         if new_lr < prev_lr:
                             if prev_lr > 0:
@@ -838,7 +840,7 @@ class Model:
                                     if hasattr(sched, 'base_lrs'):
                                         sched.base_lrs = [lr * ratio for lr in sched.base_lrs]
                             if self.accelerator.is_main_process:
-                                print(f'[LRScheduler] step {self.global_step}: lr {prev_lr:.3e} -> {new_lr:.3e} (loss_ema={self.loss_ema:.5f})')
+                                print(f'[LRScheduler] step {self.global_step}: lr {prev_lr:.3e} -> {new_lr:.3e} ({metric_name}={metric:.5f})')
 
                     # dreambooth: both halves of the loss, to see which one is not converging
                     stream_losses = {}
