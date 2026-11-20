@@ -638,11 +638,13 @@ class Model:
             except Exception as e:
                 print(f'[Warning] could not load the optimizer state from {path}: {e}')
                 return
-            # the saved groups carry the learning rate of the step they were saved at, which may
-            # be mid warmup: the configuration decides
+            # the saved groups carry the learning rate (and initial_lr written by any prior
+            # scheduler) of the step they were saved at, which may be mid warmup or from a
+            # different lr config: the current configuration decides
             for group in self.optimizer.param_groups:
                 group['lr'] = self.params.learning_rate
                 group['weight_decay'] = self.params.weight_decay
+                group.pop('initial_lr', None)
             print(f'resumed the optimizer state from {path}')
             return
 
