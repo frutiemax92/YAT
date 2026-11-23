@@ -13,6 +13,7 @@ from common.trainer import Model
 from common.precompute import precomputed_prompts_available
 from common.features_extractor import FeaturesExtractor
 from diffusers.quantizers import PipelineQuantizationConfig
+from common.torchao_nf4 import quantize_conv1x1_nf4
 
 COMPLEX_HUMAN_INSTRUCTION = [
     "Given a user prompt, generate an 'Enhanced prompt' that provides detailed visual descriptions suitable for image generation. Evaluate the level of detail in the user prompt:",
@@ -102,6 +103,11 @@ class SanaModel(Model):
         self.pipe.vae.to(torch.bfloat16)
 
         self.model = self.pipe.transformer
+        if params.lora_base_model_4bit:
+            # bnb only quantized the nn.Linear layers. The 1x1 convolutions of the Mix-FFN blocks are
+            # about half of the weights of the transformer, so they go to 4 bit NF4 through torchao
+            converted = quantize_conv1x1_nf4(self.model)
+            print(f'quantized {converted} 1x1 convolutions to NF4 with torchao')
         self.model.enable_gradient_checkpointing()
     
     def initialize(self):

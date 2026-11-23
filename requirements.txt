@@ -13,6 +13,7 @@ webdataset
 tensorboard
 boto3
 bitsandbytes
+torchao
 peft
 timm
 spacy
