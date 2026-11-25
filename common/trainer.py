@@ -19,6 +19,7 @@ import math
 import copy
 import contextlib
 import importlib
+import inspect
 from common.repa import RepaModel, RepaConfig
 from common.precompute import FeaturesPrecompute
 from common.text_precompute import TextEmbeddingsPrecompute
@@ -523,27 +524,45 @@ class Model:
     def repa_loss(self, batch):
         return 0.0
 
-    _OPTIMIZER_ALIASES = {
-        'AdamW': 'torch.optim.AdamW',
-        'AdamW8bit': 'bitsandbytes.optim.AdamW8bit',
-        'AdamW4bit': 'torchao.optim.AdamW4bit',
-        'Adam8bit': 'bitsandbytes.optim.Adam8bit',
-        'Lion8bit': 'bitsandbytes.optim.Lion8bit',
-    }
+    _OPTIMIZER_MODULES = (
+        'torch.optim',
+        'bitsandbytes.optim',
+        'torchao.optim',
+    )
+
+    @classmethod
+    def _resolve_optimizer_class(cls, opt_type):
+        """Resolves a bare optimizer name (searching torch.optim, bitsandbytes.optim, torchao.optim)
+        or an explicit dotted class path to a `torch.optim.Optimizer` subclass."""
+        if '.' in opt_type:
+            module_name, cls_name = opt_type.rsplit('.', 1)
+            return getattr(importlib.import_module(module_name), cls_name)
+        for module_name in cls._OPTIMIZER_MODULES:
+            try:
+                module = importlib.import_module(module_name)
+            except ImportError:
+                continue
+            candidate = getattr(module, opt_type, None)
+            if (isinstance(candidate, type)
+                    and issubclass(candidate, torch.optim.Optimizer)
+                    and candidate is not torch.optim.Optimizer):
+                return candidate
+        raise ValueError(
+            f'Unknown optimizer {opt_type!r}: not found in {", ".join(cls._OPTIMIZER_MODULES)}; '
+            f'use a dotted class path such as torch.optim.AdamW'
+        )
 
     def _build_optimizer(self, params_to_optimizer):
         """Instantiates the optimizer named in `params.optimizer` with its remaining keys as kwargs."""
         opt_cfg = dict(self.params.optimizer)
         opt_type = opt_cfg.pop('type')
-        opt_path = self._OPTIMIZER_ALIASES.get(opt_type, opt_type)
-        if '.' not in opt_path:
-            raise ValueError(
-                f'Unknown optimizer {opt_type!r}: use a dotted class path such as torch.optim.AdamW'
-            )
-        module_name, cls_name = opt_path.rsplit('.', 1)
-        opt_cls = getattr(importlib.import_module(module_name), cls_name)
-        opt_cfg.setdefault('lr', self.params.learning_rate)
-        opt_cfg.setdefault('weight_decay', self.params.weight_decay)
+        opt_cls = self._resolve_optimizer_class(opt_type)
+        init_params = inspect.signature(opt_cls.__init__).parameters
+        accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in init_params.values())
+        if 'lr' in init_params or accepts_kwargs:
+            opt_cfg.setdefault('lr', self.params.learning_rate)
+        if 'weight_decay' in init_params or accepts_kwargs:
+            opt_cfg.setdefault('weight_decay', self.params.weight_decay)
         return opt_cls(params_to_optimizer, **opt_cfg)
 
     def _build_single_lr_scheduler(self, cfg):
