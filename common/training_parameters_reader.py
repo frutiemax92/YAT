@@ -125,6 +125,7 @@ class TrainingParameters:
         self.precompute_text_embeddings = False
         self.text_embeddings_cache_dir = 'precomputed_text_embeddings'
         self.text_embeddings_force = False
+        self.text_embeddings_4bit = False
     
     @staticmethod
     def read_r2_credentials():
@@ -531,6 +532,8 @@ class TrainingParameters:
                 self.text_embeddings_cache_dir = yaml_root['text_embeddings_cache_dir']
             # encode everything again even if the cache is complete
             self.text_embeddings_force = 'text_embeddings_force' in yaml_root.keys()
+            # store each cached embedding in blockwise 4-bit NF4 (~3.76x smaller than bfloat16)
+            self.text_embeddings_4bit = str(yaml_root.get('text_embeddings_4bit', 'false')).strip().lower() in ('true', '1', 'yes')
             self.compute_features = True
             if 'vae_max_batch_size' not in yaml_root.keys():
                 self.vae_max_batch_size = 1

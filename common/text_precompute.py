@@ -13,6 +13,7 @@ Layout of text_embeddings_cache_dir:
 import functools
 import hashlib
 import json
+import math
 import os
 import tarfile
 
@@ -23,6 +24,118 @@ from common.precompute import FeaturesPrecompute, PromptEmbeddingCache
 
 PROMPT_EMBEDDINGS_FILE = 'prompt_embeddings.pt'
 META_FILE = 'meta.json'
+
+# 16-level NormalFloat4 codebook (Dettmers et al., QLoRA), symmetric around exact 0.0
+NF4_LEVELS = (
+    -1.0,
+    -0.6961928009986877,
+    -0.5250730514526367,
+    -0.39491748809814453,
+    -0.28444138169288635,
+    -0.18477343022823334,
+    -0.09105003625154495,
+    0.0,
+    0.07958029955625534,
+    0.16093020141124725,
+    0.24611230194568634,
+    0.33791524171829224,
+    0.44070982933044434,
+    0.5626170039176941,
+    0.7229568362236023,
+    1.0,
+)
+NF4_GROUP_SIZE = 64
+
+_NF4_TABLE_CACHE = {}
+_NF4_MIDS_CACHE = {}
+
+
+def _nf4_table(device, dtype):
+    key = (device, dtype)
+    table = _NF4_TABLE_CACHE.get(key)
+    if table is None:
+        table = torch.tensor(NF4_LEVELS, device=device, dtype=dtype)
+        _NF4_TABLE_CACHE[key] = table
+    return table
+
+
+def _nf4_midpoints(device):
+    mids = _NF4_MIDS_CACHE.get(device)
+    if mids is None:
+        levels = torch.tensor(NF4_LEVELS, device=device, dtype=torch.float32)
+        mids = (levels[:-1] + levels[1:]) * 0.5
+        _NF4_MIDS_CACHE[device] = mids
+    return mids
+
+
+def quantize_nf4(tensor, group_size=NF4_GROUP_SIZE):
+    """Pack a tensor into blockwise 4-bit NF4 (2 nibbles/byte + one bf16 absmax per block)."""
+    if group_size <= 0 or group_size % 2 != 0:
+        raise ValueError(f'group_size must be a positive even integer, got {group_size}')
+    shape = tuple(tensor.shape)
+    dtype_name = str(tensor.dtype).removeprefix('torch.')
+    numel = tensor.numel()
+    if numel == 0:
+        return {
+            'format': 'nf4',
+            'packed': torch.empty(0, dtype=torch.uint8),
+            'absmax': torch.empty(0, dtype=torch.bfloat16),
+            'shape': shape,
+            'dtype': dtype_name,
+            'group_size': group_size,
+        }
+
+    flat = tensor.detach().reshape(-1).to(torch.float32)
+    pad = (-numel) % group_size
+    if pad:
+        flat = torch.nn.functional.pad(flat, (0, pad))
+    blocks = flat.reshape(-1, group_size)
+
+    absmax = blocks.abs().amax(dim=-1, keepdim=True)
+    safe_absmax = torch.where(absmax == 0, torch.ones_like(absmax), absmax)
+    normalized = blocks / safe_absmax
+
+    q = torch.bucketize(normalized, _nf4_midpoints(blocks.device)).to(torch.uint8)
+    packed = (q[:, 0::2] << 4) | q[:, 1::2]
+    return {
+        'format': 'nf4',
+        'packed': packed.contiguous().to('cpu'),
+        'absmax': absmax.squeeze(-1).to(torch.bfloat16).contiguous().to('cpu'),
+        'shape': shape,
+        'dtype': dtype_name,
+        'group_size': group_size,
+    }
+
+
+def dequantize_nf4(payload, device=None):
+    """Restore a blockwise 4-bit NF4 payload back to its original shape and dtype."""
+    shape = tuple(payload['shape'])
+    dtype = getattr(torch, payload['dtype'])
+    numel = math.prod(shape)
+    if numel == 0:
+        return torch.empty(shape, dtype=dtype, device=device)
+
+    group_size = int(payload['group_size'])
+    packed = payload['packed']
+    absmax = payload['absmax']
+    if device is not None:
+        packed = packed.to(device)
+        absmax = absmax.to(device)
+
+    hi = (packed >> 4) & 0x0F
+    lo = packed & 0x0F
+    indices = torch.stack((hi, lo), dim=-1).reshape(-1, group_size).to(torch.long)
+    table = _nf4_table(packed.device, dtype)
+    values = table[indices] * absmax.to(dtype).unsqueeze(-1)
+    return values.reshape(-1)[:numel].reshape(shape)
+
+
+def load_embedding(path, device=None):
+    """Load a cached caption embedding (plain tensor or 4-bit NF4 payload) onto device."""
+    loaded = torch.load(path, map_location='cpu', weights_only=True)
+    if isinstance(loaded, dict) and loaded.get('format') == 'nf4':
+        return dequantize_nf4(loaded, device=device)
+    return loaded.to(device) if device is not None else loaded
 
 
 @functools.lru_cache(maxsize=4)
@@ -126,7 +239,7 @@ class TextEmbeddingsPrecompute(FeaturesPrecompute):
                 if not os.path.exists(path):
                     raise KeyError(f'no precomputed text embedding for the caption {caption!r} in {cache_dir}: '
                                    f'the dataset changed, set text_embeddings_force to encode it again')
-                embeddings.append(torch.load(path, map_location='cpu', weights_only=True).to(device))
+                embeddings.append(load_embedding(path, device=device))
             return embeddings
 
         self.model.extract_embeddings = lookup
@@ -145,6 +258,7 @@ class TextEmbeddingsPrecompute(FeaturesPrecompute):
             mine = [caption for caption in mine if not os.path.exists(caption_path(self.cache_dir, caption))]
         step = max(1, self.params.text_encoder_max_batch_size)
         extract = self.model.extract_embeddings
+        use_4bit = getattr(self.params, 'text_embeddings_4bit', False)
         pbar = tqdm(total=len(mine), desc='Precomputing text embeddings',
                     disable=not self.accelerator.is_main_process)
         with torch.no_grad():
@@ -156,7 +270,8 @@ class TextEmbeddingsPrecompute(FeaturesPrecompute):
                     os.makedirs(os.path.dirname(path), exist_ok=True)
                     # written under another name first, so a run stopped midway never leaves a torn file
                     temporary = f'{path}.{rank}.tmp'
-                    torch.save(embedding.detach().to('cpu'), temporary)
+                    payload = quantize_nf4(embedding) if (use_4bit and torch.is_tensor(embedding)) else embedding.detach().to('cpu')
+                    torch.save(payload, temporary)
                     os.replace(temporary, path)
                 pbar.update(len(chunk))
         pbar.close()
