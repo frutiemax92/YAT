@@ -10,6 +10,7 @@ Layout of text_embeddings_cache_dir:
     prompt_embeddings.pt    the validation prompts, memoized for pipe.encode_prompt
     ab/abcdef....pt         the embedding of one caption, named after the sha1 of the caption
 """
+import contextlib
 import functools
 import hashlib
 import json
@@ -205,6 +206,27 @@ def text_embeddings_available(params):
     return len(missing_captions(params)) == 0
 
 
+@contextlib.contextmanager
+def _park_model_on_cpu(module):
+    """Temporarily moves CUDA parameters/buffers of `module` to CPU via `.data` while the text
+    encoder runs. Updating `.data` keeps bitsandbytes `Params4bit` quant_state intact."""
+    moved = []
+    if module is not None:
+        for tensor in list(module.parameters()) + list(module.buffers()):
+            if tensor.is_cuda:
+                moved.append((tensor, tensor.device))
+                tensor.data = tensor.data.to('cpu')
+        if moved:
+            torch.cuda.empty_cache()
+    try:
+        yield
+    finally:
+        for tensor, device in moved:
+            tensor.data = tensor.data.to(device)
+        if moved:
+            torch.cuda.empty_cache()
+
+
 class TextEmbeddingsPrecompute(FeaturesPrecompute):
     """Encodes every caption once, then swaps the text encoder for a lookup on disk."""
 
@@ -305,27 +327,28 @@ class TextEmbeddingsPrecompute(FeaturesPrecompute):
             print(f'using the {len(dataset_captions(self.params))} precomputed text embeddings of '
                   f'{self.cache_dir}, the text encoder is not loaded')
         else:
-            if missing:
-                print(f'encoding {len(missing)} captions')
-                self.encode_captions(dataset_captions(self.params), force=self.params.text_embeddings_force)
-            else:
-                print(f'all the text embeddings are already in {self.cache_dir}')
-            self.accelerator.wait_for_everyone()
+            with _park_model_on_cpu(getattr(self.model, 'model', None)):
+                if missing:
+                    print(f'encoding {len(missing)} captions')
+                    self.encode_captions(dataset_captions(self.params), force=self.params.text_embeddings_force)
+                else:
+                    print(f'all the text embeddings are already in {self.cache_dir}')
+                self.accelerator.wait_for_everyone()
 
-            # from here the validation prompts are memoized so validation survives the encoder being freed
-            self.prompt_cache.recording = True
-            validation_ready = False
-            if self.accelerator.is_main_process:
-                with torch.no_grad():
-                    validation_ready = bool(self.model.encode_validation_prompts())
-                self.save_prompt_embeddings()
-                if not validation_ready:
-                    print('this model cannot encode its validation prompts up front, so the text encoder '
-                          'stays loaded until the first validation has run')
-            self.accelerator.wait_for_everyone()
-            if validation_ready or not self.accelerator.is_main_process:
-                self.free_text_encoder()
-            self.report_memory('after freeing the text encoder, the vae stays loaded')
+                # from here the validation prompts are memoized so validation survives the encoder being freed
+                self.prompt_cache.recording = True
+                validation_ready = False
+                if self.accelerator.is_main_process:
+                    with torch.no_grad():
+                        validation_ready = bool(self.model.encode_validation_prompts())
+                    self.save_prompt_embeddings()
+                    if not validation_ready:
+                        print('this model cannot encode its validation prompts up front, so the text encoder '
+                              'stays loaded until the first validation has run')
+                self.accelerator.wait_for_everyone()
+                if validation_ready or not self.accelerator.is_main_process:
+                    self.free_text_encoder()
+                self.report_memory('after freeing the text encoder, the vae stays loaded')
 
         self.install_lookup()
         # the unconditional embedding comes from the same files

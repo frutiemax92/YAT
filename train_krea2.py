@@ -126,8 +126,24 @@ class Krea2Model(Model):
     def extract_embeddings(self, captions):
         # move text_encoder to cuda if not already done
         self.pipe.text_encoder.to(device=self.accelerator.device)
+
+        # get_text_hidden_states pads every prompt to max_sequence_length; shrink the call to the
+        # longest caption in this chunk so a 4096 cap does not pad short captions to 4096 tokens
+        prefix_idx = self.pipe.prompt_template_encode_start_idx
+        num_suffix = self.pipe.prompt_template_encode_num_suffix_tokens
+        max_body_len = self.max_sequence_length + prefix_idx - num_suffix
+        prefixed = [self.pipe.prompt_template_encode_prefix + caption for caption in captions]
+        encoded = self.pipe.tokenizer(
+            prefixed,
+            truncation=True,
+            padding=False,
+            max_length=max_body_len,
+        )
+        longest = max(len(ids) for ids in encoded['input_ids'])
+        chunk_max_len = min(self.max_sequence_length, max(1, longest - prefix_idx + num_suffix))
+
         hidden_states, attention_mask = self.pipe.get_text_hidden_states(
-            captions, self.max_sequence_length, device=self.accelerator.device)
+            captions, chunk_max_len, device=self.accelerator.device)
 
         # only save embeddings where the mask is not zero
         embeds = [hidden_states[idx][attention_mask[idx]] for idx in range(len(hidden_states))]
