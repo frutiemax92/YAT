@@ -25,7 +25,7 @@ from common.precompute import FeaturesPrecompute
 from common.text_precompute import TextEmbeddingsPrecompute
 from common.peft_bnb_patch import patch_lycoris_for_bnb_4bit
 from common import lw_controlnet
-from common.offload import offload_frozen_blocks
+from common.offload import offload_frozen_blocks, offload_activations
 from accelerate.utils import InitProcessGroupKwargs, DistributedDataParallelKwargs
 from datetime import timedelta
 from peft.helpers import rescale_adapter_scale
@@ -737,7 +737,9 @@ class Model:
         """
         self.apply_unconditional_dropout(batch)
         with self.batch_reference(batch):
-            loss = self.diffusion_loss(batch)
+            activation_offload = offload_activations() if self.params.offload_to_cpu else contextlib.nullcontext()
+            with activation_offload:
+                loss = self.diffusion_loss(batch)
             self.accelerator.backward(loss if scale == 1.0 else loss * scale)
         return loss.detach()
 

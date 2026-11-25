@@ -98,6 +98,48 @@ class Krea2Model(Model):
                 lambda module, *args: torch.utils.checkpoint.checkpoint(module.__call__, *args, use_reentrant=True))
         else:
             self.model.enable_gradient_checkpointing()
+        self._enable_text_fusion_checkpointing()
+
+    def _enable_text_fusion_checkpointing(self):
+        """Gradient-checkpoint Krea2TextFusion's layerwise and refiner blocks.
+
+        diffusers' Krea2Transformer2DModel only checkpoints `transformer_blocks`, leaving
+        `text_fusion` (2 layerwise + 2 refiner SwiGLU blocks) uncheckpointed. On long
+        captions, `layerwise_blocks` runs over (B * text_seq_len, 12, 2560) and would
+        otherwise hold large activations plus the 4-bit dequantization contexts of all
+        4 blocks on GPU for the entire forward and backward pass.
+        """
+        transformer = self.pipe.transformer
+        text_fusion = transformer.text_fusion
+
+        def checkpointed_forward(encoder_hidden_states, attention_mask=None):
+            batch_size, seq_len, num_text_layers, dim = encoder_hidden_states.shape
+            use_ckpt = torch.is_grad_enabled() and transformer.gradient_checkpointing
+
+            hidden_states = encoder_hidden_states.reshape(batch_size * seq_len, num_text_layers, dim)
+            if use_ckpt and not hidden_states.requires_grad:
+                # reentrant checkpointing drops grad_fn when no input requires grad
+                hidden_states = hidden_states.detach().requires_grad_(True)
+
+            for block in text_fusion.layerwise_blocks:
+                hidden_states = hidden_states.contiguous()
+                if use_ckpt:
+                    hidden_states = transformer._gradient_checkpointing_func(block, hidden_states)
+                else:
+                    hidden_states = block(hidden_states)
+
+            hidden_states = hidden_states.reshape(batch_size, seq_len, num_text_layers, dim).permute(0, 1, 3, 2)
+            hidden_states = text_fusion.projector(hidden_states).squeeze(-1)
+
+            for block in text_fusion.refiner_blocks:
+                if use_ckpt:
+                    hidden_states = transformer._gradient_checkpointing_func(block, hidden_states, attention_mask)
+                else:
+                    hidden_states = block(hidden_states, attention_mask=attention_mask)
+
+            return hidden_states
+
+        text_fusion.forward = checkpointed_forward
 
     def initialize(self):
         super().initialize()

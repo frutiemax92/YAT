@@ -122,3 +122,30 @@ class BlockOffload:
 
 def offload_frozen_blocks(model, device, percentage=100.0):
     return BlockOffload(model, device, percentage)
+
+
+def offload_activations(min_bytes=1024 * 1024, pin_memory=True):
+    """Offload large autograd saved tensors (e.g. checkpointed block inputs) to pinned CPU memory.
+
+    Only moves plain CUDA activation tensors at least `min_bytes` in size, leaving parameters,
+    quantized tensor subclasses, and small tensors (biases, norms, timestep embeddings) on GPU.
+    """
+    use_pin = pin_memory and torch.cuda.is_available()
+
+    def pack(tensor):
+        if (not tensor.is_cuda
+                or type(tensor) is not torch.Tensor
+                or tensor.is_sparse
+                or tensor.numel() * tensor.element_size() < min_bytes):
+            return (None, tensor)
+        packed = torch.empty(tensor.size(), dtype=tensor.dtype, layout=tensor.layout, pin_memory=use_pin)
+        packed.copy_(tensor)
+        return (tensor.device, packed)
+
+    def unpack(packed):
+        device, tensor = packed
+        if device is None:
+            return tensor
+        return tensor.to(device, non_blocking=use_pin)
+
+    return torch.autograd.graph.saved_tensors_hooks(pack, unpack)
