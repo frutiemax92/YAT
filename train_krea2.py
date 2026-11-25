@@ -78,8 +78,8 @@ class Krea2Model(Model):
         if self.pipe.text_encoder != None:
             self.pipe.text_encoder.train(False)
 
-        # fixed text sequence length consumed by the transformer, matching the pipeline's own default
-        self.max_sequence_length = 512
+        # upper bound on the text sequence length (each batch is padded to its own longest caption)
+        self.max_sequence_length = 4096
 
         # the transformer takes 64 channels out of the 16 channel qwen-image latent, which is a 2x2
         # patchify, so its blocks see a token grid half the size of the latent on each side.
