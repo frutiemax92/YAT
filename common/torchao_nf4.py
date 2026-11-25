@@ -2,8 +2,11 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchao.quantization import NF4Tensor, to_nf4
-from torchao.quantization.quantize_.workflows.nf4.nf4_tensor import linear_nf4
+try:
+    from torchao.quantization import NF4Tensor, to_nf4
+    from torchao.quantization.quantize_.workflows.nf4.nf4_tensor import linear_nf4
+except ImportError:
+    from torchao.dtypes.nf4tensor import NF4Tensor, to_nf4, linear_nf4
 
 
 class NF4Conv1x1(nn.Conv2d):
