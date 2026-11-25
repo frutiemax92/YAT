@@ -526,6 +526,7 @@ class Model:
     _OPTIMIZER_ALIASES = {
         'AdamW': 'torch.optim.AdamW',
         'AdamW8bit': 'bitsandbytes.optim.AdamW8bit',
+        'AdamW4bit': 'torchao.optim.AdamW4bit',
         'Adam8bit': 'bitsandbytes.optim.Adam8bit',
         'Lion8bit': 'bitsandbytes.optim.Lion8bit',
     }
