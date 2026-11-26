@@ -150,7 +150,7 @@ class MossImageModel(Model):
             self.pipe.text_encoder.train(False)
 
         # the chat template of the prompt is part of the tokens, so this is a little above the caption length
-        self.max_sequence_length = 1024
+        self.max_sequence_length = 4096
 
         # the vae downsamples 8x and the latents are patchified 2x2 into 128 channels, so the
         # transformer works on a grid 16x smaller than the image

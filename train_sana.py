@@ -26,6 +26,12 @@ COMPLEX_HUMAN_INSTRUCTION = [
     "User Prompt: ",
 ]
 
+# diffusers truncates every prompt to 300 tokens by default, which cuts nearly all the long captions of the
+# datasets. The text cross attention has no positional table, so the transformer accepts any length. The
+# validation prompts are all encoded with this fixed length (padding is masked out), which keeps the memoized
+# calls of the precompute pass identical to the ones validate() makes
+MAX_SEQUENCE_LENGTH = 2048
+
 
 class SanaModel(Model):
     def __init__(self, params : TrainingParameters):
@@ -132,10 +138,14 @@ class SanaModel(Model):
     def extract_embeddings(self, captions):
         # move text_encoder to cuda if not already done
         self.pipe.text_encoder.to(device=self.accelerator.device)
+        # pad to the longest caption of the batch instead of truncating to the 300 tokens of the default
+        tokenizer = self.pipe.tokenizer
+        longest = max(len(tokenizer(caption)['input_ids']) for caption in captions)
         prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
         self.pipe.encode_prompt(captions,
                                 do_classifier_free_guidance=False,
-                                device=self.accelerator.device)
+                                device=self.accelerator.device,
+                                max_sequence_length=max(longest, 2))
 
         # only save embeddings where the mask is not zero
         embeds = [prompt_embeds[idx][prompt_attention_mask[idx].bool()] for idx in range(len(prompt_embeds))]
@@ -151,7 +161,8 @@ class SanaModel(Model):
         if self.pipe.text_encoder != None:
             self.pipe.text_encoder.to(device=self.accelerator.device)
         for prompt in self.params.validation_prompts:
-            self.pipe.encode_prompt(prompt, complex_human_instruction=COMPLEX_HUMAN_INSTRUCTION)
+            self.pipe.encode_prompt(prompt, complex_human_instruction=COMPLEX_HUMAN_INSTRUCTION,
+                                    max_sequence_length=MAX_SEQUENCE_LENGTH)
         return True
 
     def validate(self):
@@ -174,7 +185,8 @@ class SanaModel(Model):
             text_encoder = text_encoder.to(device=self.accelerator.device)
             self.pipe.text_encoder = text_encoder
             prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = \
-                self.pipe.encode_prompt(prompt, complex_human_instruction=complex_human_instruction)
+                self.pipe.encode_prompt(prompt, complex_human_instruction=complex_human_instruction,
+                                        max_sequence_length=MAX_SEQUENCE_LENGTH)
             embeds.append((prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask))
         
         self.pipe.text_encoder = None
